@@ -10,7 +10,7 @@ const POLICY_END = "<!-- TASK-GUARD POLICY END -->";
 const POLICY = `${POLICY_START}
 For substantial tasks, use $task-guard before starting the task and before each substantial implementation phase.
 
-Treat one task as one thread. A quota reset is a pause/resume boundary, not a task boundary. If quota is insufficient, save a clean checkpoint without marking the task complete, then resume the same thread after reset when the current-thread automation tool is available. Finish only after the original acceptance criteria and required tests pass; start the next task in a new thread.
+Treat one task as one thread-level goal and decompose it into dependency-aware phases. Use JIT authoritative quota snapshots at critical boundaries; never present cached quota as current. Measure before/after snapshots, use measured history to select work that fits, and keep checkpoint, Discord, and automation reset scheduling on the same pause snapshot. A quota reset is a pause/resume boundary, not a task boundary. Finish only after the original acceptance criteria and required tests pass; start the next task in a new thread.
 ${POLICY_END}`;
 
 async function atomicWrite(filePath, content) {

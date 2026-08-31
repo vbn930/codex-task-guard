@@ -37,6 +37,8 @@ Save it with:
 node <skill-root>/scripts/task-guard.mjs checkpoint save --project <project> --input <file>
 ```
 
+For a quota pause, wrap this object as `"checkpoint"` and the non-secret Discord fields as `"notification"`, then use `pause prepare` instead. It refreshes authoritative quota once, writes `quota_snapshot`, derives `resume_after` from its verified five-hour reset, saves checkpoint schema v2, sends Discord from the same snapshot, and returns `automation_schedule` with the identical reset, snapshot ID, and observation time. Do not copy a reset from another read.
+
 The utility writes `<project>/.codex/task-guard-checkpoint.md`, adds it to the repository-local Git exclude file, and stores minimal lookup metadata under the Codex home directory.
 
 Only one `WORKING` or `PAUSED_FOR_QUOTA` task may own a repository checkpoint. Saving a different `task_id` while one is active fails with `ACTIVE_CHECKPOINT_EXISTS` and leaves the first checkpoint untouched. Re-saving the same `task_id`, including after adding `heartbeat_automation_id`, remains supported.

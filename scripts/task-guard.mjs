@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { readRateLimits } from "./lib/app-server.mjs";
 import {
   auditRegistry,
   completeTask,
@@ -10,9 +9,17 @@ import {
   saveCheckpoint,
   verifyCheckpoint,
 } from "./lib/checkpoint.mjs";
-import { notifyDiscord } from "./lib/discord.mjs";
+import { notificationsEnabled, notifyDiscord } from "./lib/discord.mjs";
 import { runDoctor } from "./lib/doctor.mjs";
-import { normalizeQuotaResponse, quotaFromTestFixture } from "./lib/quota.mjs";
+import { completePhaseAndDecide, prepareQuotaPause } from "./lib/lifecycle.mjs";
+import { quotaFromTestFixture } from "./lib/quota.mjs";
+import { createQuotaSnapshotStore } from "./lib/quota-snapshot.mjs";
+import {
+  completePhase,
+  evaluateBudget,
+  readUsageHistory,
+  startPhase,
+} from "./lib/usage.mjs";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
@@ -21,25 +28,20 @@ function printJson(value) {
 }
 
 async function quotaCommand() {
-  const fixture = process.env.TASK_GUARD_TEST_QUOTA;
-  if (fixture) {
-    printJson(quotaFromTestFixture(fixture));
-    return 0;
-  }
+  const snapshot = await refreshCurrentQuota();
+  printJson(snapshot);
+  return snapshot.freshness === "AUTHORITATIVE" ? 0 : 2;
+}
 
-  try {
-    printJson(normalizeQuotaResponse(await readRateLimits()));
-    return 0;
-  } catch (error) {
-    printJson({
-      source: "codex_app_server",
-      observed_at: new Date().toISOString(),
-      five_hour: { available: false },
-      weekly: { available: false },
-      error: { code: "RATE_LIMIT_READ_FAILED", message: error.message },
-    });
-    return 2;
-  }
+function currentQuotaStore() {
+  const fixture = process.env.TASK_GUARD_TEST_QUOTA;
+  return createQuotaSnapshotStore({
+    ...(fixture ? { reader: async () => quotaFromTestFixture(fixture) } : {}),
+  });
+}
+
+async function refreshCurrentQuota() {
+  return currentQuotaStore().refresh();
 }
 
 function optionValue(args, name, { required = false } = {}) {
@@ -109,7 +111,13 @@ async function notifyCommand(args) {
   const [event, ...options] = args;
   if (!event) throw new Error("notification event is required");
   const payload = await readJsonInput(optionValue(options, "--input", { required: true }));
-  printJson(await notifyDiscord(event, payload));
+  const quotaEvent = ["TASK_STARTED", "QUOTA_PAUSED", "TASK_RESUMED"].includes(event);
+  const notificationConfigured = notificationsEnabled(process.env)
+    && Boolean(process.env.CODEX_DISCORD_WEBHOOK_URL);
+  const snapshot = quotaEvent && notificationConfigured
+    ? await refreshCurrentQuota()
+    : undefined;
+  printJson(await notifyDiscord(event, payload, { snapshot }));
   return 0;
 }
 
@@ -127,14 +135,105 @@ async function doctorCommand(args) {
   return result.ok ? 0 : 4;
 }
 
+function parseConcurrentUsage(value) {
+  if (value === undefined || value === "unknown") return null;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error("--concurrent-usage must be true, false, or unknown");
+}
+
+async function phaseCommand(args) {
+  const [action, ...options] = args;
+  const projectPath = optionValue(options, "--project") ?? process.cwd();
+  if (action === "start") {
+    const metadata = await readJsonInput(optionValue(options, "--input", { required: true }));
+    printJson(await startPhase({
+      projectPath,
+      metadata,
+      snapshot: await refreshCurrentQuota(),
+    }));
+    return 0;
+  }
+  if (action === "complete") {
+    printJson(await completePhase({
+      projectPath,
+      phaseId: optionValue(options, "--phase-id", { required: true }),
+      concurrentUsage: parseConcurrentUsage(optionValue(options, "--concurrent-usage")),
+      snapshot: await refreshCurrentQuota(),
+    }));
+    return 0;
+  }
+  if (action === "finish") {
+    const input = await readJsonInput(optionValue(options, "--input", { required: true }));
+    printJson(await completePhaseAndDecide({
+      projectPath,
+      phaseId: optionValue(options, "--phase-id", { required: true }),
+      concurrentUsage: parseConcurrentUsage(input.concurrent_usage),
+      phases: input.phases,
+      safetyReservePercent: input.safety_reserve_percent,
+      snapshotStore: currentQuotaStore(),
+      ...(input.notification ? {
+        notification: {
+          event: input.notification.event,
+          payload: input.notification.payload,
+        },
+      } : {}),
+    }));
+    return 0;
+  }
+  throw new Error("phase action must be start, complete, or finish");
+}
+
+async function historyCommand(args) {
+  const [action, ...options] = args;
+  if (action !== "list") throw new Error("history action must be list");
+  const rawLimit = optionValue(options, "--limit");
+  const limit = rawLimit === undefined ? 500 : Number.parseInt(rawLimit, 10);
+  if (!Number.isInteger(limit) || limit < 1) throw new Error("--limit must be a positive integer");
+  printJson(await readUsageHistory({ limit }));
+  return 0;
+}
+
+async function budgetCommand(args) {
+  const [action, ...options] = args;
+  if (action !== "evaluate") throw new Error("budget action must be evaluate");
+  const input = await readJsonInput(optionValue(options, "--input", { required: true }));
+  const snapshot = await refreshCurrentQuota();
+  printJson(evaluateBudget({
+    history: await readUsageHistory(),
+    phases: input.phases,
+    snapshot,
+    safetyReservePercent: input.safety_reserve_percent,
+  }));
+  return 0;
+}
+
+async function pauseCommand(args) {
+  const [action, ...options] = args;
+  if (action !== "prepare") throw new Error("pause action must be prepare");
+  const projectPath = optionValue(options, "--project") ?? process.cwd();
+  const input = await readJsonInput(optionValue(options, "--input", { required: true }));
+  printJson(await prepareQuotaPause({
+    projectPath,
+    checkpointState: input.checkpoint,
+    notificationPayload: input.notification,
+    snapshotStore: currentQuotaStore(),
+  }));
+  return 0;
+}
+
 function printHelp() {
-  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  doctor [--project PATH]\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint resume --project PATH --task-id ID\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
+  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  doctor [--project PATH]\n  phase start --project PATH --input FILE| -\n  phase complete --project PATH --phase-id ID [--concurrent-usage true|false|unknown]\n  phase finish --project PATH --phase-id ID --input FILE| -\n  history list [--limit N]\n  budget evaluate --input FILE| -\n  pause prepare --project PATH --input FILE| -\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint resume --project PATH --task-id ID\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
 }
 
 export async function main(argv = process.argv.slice(2)) {
   const [command] = argv;
   if (command === "quota") return quotaCommand();
   if (command === "doctor") return doctorCommand(argv.slice(1));
+  if (command === "phase") return phaseCommand(argv.slice(1));
+  if (command === "history") return historyCommand(argv.slice(1));
+  if (command === "budget") return budgetCommand(argv.slice(1));
+  if (command === "pause") return pauseCommand(argv.slice(1));
   if (command === "checkpoint") return checkpointCommand(argv.slice(1));
   if (command === "notify") return notifyCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") {

@@ -81,6 +81,8 @@ const EVENT_CONFIG = {
   },
 };
 
+const QUOTA_EVENTS = new Set(["TASK_STARTED", "QUOTA_PAUSED", "TASK_RESUMED"]);
+
 export function notificationsEnabled(env) {
   const value = env.TASK_GUARD_NOTIFICATION_ENABLED?.toLowerCase();
   return value !== "0" && value !== "false" && value !== "off";
@@ -120,14 +122,35 @@ function buildFields(definitions, payload) {
   });
 }
 
-function buildEmbed(event, payload) {
+function payloadFromSnapshot(event, payload, snapshot) {
+  if (!QUOTA_EVENTS.has(event)) return payload;
+  if (!snapshot) throw new Error("QUOTA_SNAPSHOT_REQUIRED");
+
+  const next = { ...payload };
+  const quotaKey = event === "QUOTA_PAUSED" ? "five_hour_remaining" : "quota";
+  if (snapshot.freshness === "AUTHORITATIVE" && snapshot.five_hour?.available) {
+    const remaining = snapshot.five_hour.remaining_percent;
+    next[quotaKey] = event === "QUOTA_PAUSED" ? `${remaining}%` : `${remaining}% remaining`;
+    if (snapshot.five_hour.reset_at) next.reset = snapshot.five_hour.reset_at;
+    else delete next.reset;
+  } else {
+    next[quotaKey] = snapshot.freshness === "STALE"
+      ? "Unavailable (stale snapshot)"
+      : "Unavailable (refresh failed)";
+    delete next.reset;
+  }
+  return next;
+}
+
+function buildEmbed(event, payload, snapshot) {
   const config = EVENT_CONFIG[event];
   if (!config) throw new Error(`Unsupported Discord event: ${event}`);
+  const authoritativePayload = payloadFromSnapshot(event, payload, snapshot);
   return {
     title: config.title,
     description: config.description,
     color: config.color,
-    fields: buildFields(config.fields, payload),
+    fields: buildFields(config.fields, authoritativePayload),
     footer: { text: "Codex Task Guard" },
     timestamp: new Date().toISOString(),
   };
@@ -136,20 +159,26 @@ function buildEmbed(event, payload) {
 export async function notifyDiscord(
   event,
   payload,
-  { env = process.env, fetchImpl = globalThis.fetch } = {},
+  { env = process.env, fetchImpl = globalThis.fetch, snapshot } = {},
 ) {
+  const quotaMetadata = QUOTA_EVENTS.has(event) && snapshot
+    ? {
+      quota_snapshot_id: snapshot.snapshot_id ?? null,
+      quota_observed_at: snapshot.observed_at ?? null,
+    }
+    : {};
   const webhookUrl = env.CODEX_DISCORD_WEBHOOK_URL;
   if (!notificationsEnabled(env) || !webhookUrl) {
-    return { sent: false, reason: "DISABLED" };
+    return { sent: false, reason: "DISABLED", ...quotaMetadata };
   }
   let parsed;
   try {
     parsed = new URL(webhookUrl);
   } catch {
-    return { sent: false, reason: "INVALID_WEBHOOK_URL" };
+    return { sent: false, reason: "INVALID_WEBHOOK_URL", ...quotaMetadata };
   }
   if (parsed.protocol !== "https:") {
-    return { sent: false, reason: "INVALID_WEBHOOK_URL" };
+    return { sent: false, reason: "INVALID_WEBHOOK_URL", ...quotaMetadata };
   }
 
   try {
@@ -158,14 +187,14 @@ export async function notifyDiscord(
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         username: "Codex Task Guard",
-        embeds: [buildEmbed(event, payload)],
+        embeds: [buildEmbed(event, payload, snapshot)],
         allowed_mentions: { parse: [] },
       }),
       signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) return { sent: false, reason: `HTTP_${response.status}` };
-    return { sent: true };
+    if (!response.ok) return { sent: false, reason: `HTTP_${response.status}`, ...quotaMetadata };
+    return { sent: true, ...quotaMetadata };
   } catch {
-    return { sent: false, reason: "REQUEST_FAILED" };
+    return { sent: false, reason: "REQUEST_FAILED", ...quotaMetadata };
   }
 }

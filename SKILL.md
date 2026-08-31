@@ -1,13 +1,13 @@
 ---
 name: task-guard
-description: Manage quota-sensitive, long, or multi-phase Codex coding tasks by reading Codex subscription rate-limit windows, checkpointing quota pauses, resuming the same task and thread, and sending optional Discord webhook notifications. Use before substantial implementation phases, after rate-limit errors, or when resuming a task-guard checkpoint; do not use for small one-step edits or quota questions unrelated to task lifecycle.
+description: Manage quota-sensitive, long, or multi-phase Codex coding tasks with authoritative quota snapshots, dependency-aware phases, measured usage, consistent quota pauses, same-thread resume, and optional Discord notifications. Use before substantial implementation phases, after rate-limit errors, or when resuming a task-guard checkpoint; do not use for small one-step edits or quota questions unrelated to task lifecycle.
 metadata:
-  short-description: Guard long Codex tasks across quota resets
+  short-description: Use fresh quota snapshots for task phases
 ---
 
 # Task Guard
 
-Treat one user task as one Codex thread. A quota reset is a pause/resume boundary, never a task boundary. Do not create a new thread, mark the task complete, or discard its goal merely because quota is low or an implementation phase failed.
+Treat one user task as one Codex thread and final goal. A phase is the smallest dependency-safe unit executed inside that task. A quota reset is a pause/resume boundary, never a task boundary. Do not create a new thread, mark the task complete, or discard its goal merely because quota is low or an implementation phase failed.
 
 This workflow is agent-driven rather than a deterministic lifecycle hook. Follow the checkpoints explicitly; do not claim that the JavaScript utilities detect task starts or pause Codex by themselves.
 
@@ -21,22 +21,32 @@ node <skill-root>/scripts/task-guard.mjs <command>
 
 On first use, after installation, or when quota repeatedly returns `UNKNOWN`, run `doctor --project <project>`. Required errors must be resolved before relying on automatic quota resume. A Discord warning is non-blocking because notifications are optional.
 
-Run `quota` at task start, before each substantial implementation phase, after a phase when more substantial work remains, and immediately after a rate-limit error. This uses Codex app-server and does not send a model prompt.
+Run `quota` at task start, before each substantial implementation phase, after a phase when more substantial work remains, and immediately after a rate-limit error. Treat only `freshness: AUTHORITATIVE` as current. `STALE` is last-known context and `UNAVAILABLE` is a failed refresh; neither may drive a critical decision.
+
+Before implementation, decompose the task into ordered, dependency-aware phases. Read [references/phase-input.md](references/phase-input.md). Keep phases independently finishable and small enough to checkpoint between them. Do not redefine the task merely to fit the current quota window.
 
 A confirmed rate-limit rejection from Codex always enters the pause flow, even when the follow-up quota read is healthy or unavailable. Use that read only to capture verified reset metadata; never use it to override the rejection and continue working.
 
-When beginning a new substantial task, send `TASK_STARTED` once after the initial quota read and before implementation. Include `project`, `task`, `thread`, the five-hour remaining value as `quota`, the verified five-hour `reset`, and `status`. Do not repeat it at each phase.
+When beginning a new substantial task, send `TASK_STARTED` once before implementation. The notify command refreshes JIT and derives five-hour quota/reset from its snapshot; do not carry percentage/reset strings from an earlier read.
 
 Interpret only windows whose `window_duration_minutes` is exactly `300` or `10080`. An unavailable window stays unavailable. Never relabel the weekly window as five-hour quota, infer reset times, or invent missing percentages.
 
-Classify the next decision as `SAFE`, `CAUTION`, `LOW`, or `UNKNOWN` using both remaining quota and the size/risk of the next phase. Do not use a fixed percentage alone. Small compile fixes or a bounded test rerun may continue with less quota than an architecture change, multi-file refactor, new subsystem, or integration cycle. Use `UNKNOWN` when the relevant quota cannot be read; state the uncertainty rather than claiming safety.
+Use `budget evaluate` with the current dependency-ready phases, an explicit safety reserve, and measured history. Run only the selected phase. If no measured cohort exists, the result is `INSUFFICIENT_HISTORY`; do not invent a model multiplier or claim the phase is safe. Split the phase further, run only a deliberately bounded calibration phase when justified, or pause.
+
+## Measure each phase
+
+Before changing files for a selected phase, run `phase start --project <project> --input <phase.json>`. Supply the actual active `model`, `reasoning_effort`, `phase_type`, and optional plan partition. If the active runtime values cannot be verified, use `unknown`; never substitute config defaults while claiming they are active session values.
+
+Finish the phase at a coherent boundary. When more work remains, prefer `phase finish --project <project> --phase-id <id> --input <decision.json>` so one authoritative after snapshot is shared by history, predictor, next-phase decision, and any quota-bearing notification. Use plain `phase complete` only when no immediate budget decision is needed. Use `concurrent_usage: false` only when no other shared-pool work ran.
+
+The estimator matches exact plan/model/reasoning/phase-type cohorts and uses the highest valid observed delta as its conservative V1 upper cost. It does not extrapolate across models or plans, apply official message ranges as task-cost formulas, or use an invented percentile. After every completed phase, re-evaluate the pending phases against the newly observed quota.
 
 ## Pause for quota
 
-When quota is insufficient for the next substantial phase:
+When no dependency-ready phase with measured cost fits the available budget, and further safe decomposition is not useful:
 
-1. Read [references/checkpoint-input.md](references/checkpoint-input.md), create the state JSON in a temporary location, and run `checkpoint save`. Do not report a successful pause unless the command exits successfully.
-2. Run `notify QUOTA_PAUSED` with a non-secret event JSON containing `project`, `task`, `reason`, `five_hour_remaining`, verified `reset`, `checkpoint`, `resume`, and `status`. Notification failure is non-fatal.
+1. Read [references/checkpoint-input.md](references/checkpoint-input.md) and run `pause prepare`. It refreshes once, saves the checkpoint first, then uses the same snapshot for registry, Discord, and returned `automation_schedule`. Do not separately reuse an earlier quota/reset.
+2. Notification failure is non-fatal, but an unavailable authoritative five-hour reset means automatic scheduling must not proceed.
 3. If the Codex app current-thread heartbeat automation tool is available and a local run can keep the host powered on, the desktop app running, and the project available on disk, schedule this same thread with its first wake at or just after the verified five-hour reset. Its prompt must recheck quota, verify the checkpoint, clean up this heartbeat, resume the checkpoint, continue the exact next action, and avoid creating a new task. Capture the returned automation ID as `heartbeat_automation_id`, add it to the same state JSON, and run `checkpoint save` again. If the ID cannot be persisted, delete or disable the automation and use the fallback below. Do not invent an automation interface or schedule.
 4. If automation is unavailable, leave `resume_after` and the checkpoint path in the registry, tell the user how to resume this same thread, and stop the current execution.
 
@@ -46,7 +56,7 @@ The paused state is `PAUSED_FOR_QUOTA`, not completed or failed.
 
 Run `checkpoint verify` before doing more work. If it reports `REPOSITORY_STATE_CHANGED`, inspect `git status`, `git diff`, and the checkpoint; reconcile deliberately or send `TASK_BLOCKED`. Never overwrite external changes or trust the checkpoint over the filesystem.
 
-When verification succeeds, read `checkpoint show`. If it contains `heartbeat_automation_id`, delete or disable that automation before continuing and report any cleanup failure. Then run `checkpoint resume --project <project> --task-id <task-id>`, send `TASK_RESUMED` with the five-hour `quota`, verified five-hour `reset`, `checkpoint`, `repository`, the actual first `exact_next_actions` entry as `resume_point`, and `status`, and continue from `exact_next_actions`. Never use a generic resume-point description. Keep using the same thread.
+Immediately after wake, refresh quota, then verify the checkpoint and repository. If verification succeeds, delete the stored heartbeat, run `checkpoint resume`, and send `TASK_RESUMED`; the notify command refreshes JIT and derives quota/reset rather than reusing the wake value. Use the actual first `exact_next_actions` entry as `resume_point`.
 
 ## Complete or block
 

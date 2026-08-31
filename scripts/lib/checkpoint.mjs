@@ -45,7 +45,9 @@ async function withRegistryLock(taskGuardHome, operation) {
       handle = await open(lockPath, "wx");
       await handle.writeFile(`${process.pid}\n`, "utf8");
     } catch (error) {
-      if (error.code !== "EEXIST") throw error;
+      const windowsLockContention = process.platform === "win32"
+        && ["EACCES", "EPERM"].includes(error.code);
+      if (error.code !== "EEXIST" && !windowsLockContention) throw error;
       const metadata = await stat(lockPath).catch(() => null);
       if (metadata && Date.now() - metadata.mtimeMs > 60_000) {
         await rm(lockPath, { force: true });
@@ -258,7 +260,8 @@ export async function auditRegistry({ taskGuardHome = defaultTaskGuardHome() } =
 }
 
 async function writeRegistry(taskGuardHome, registry) {
-  await atomicWrite(path.join(taskGuardHome, "index.json"), `${JSON.stringify(registry, null, 2)}\n`);
+  const current = { ...registry, schema_version: 2 };
+  await atomicWrite(path.join(taskGuardHome, "index.json"), `${JSON.stringify(current, null, 2)}\n`);
 }
 
 export async function saveCheckpoint({
@@ -271,8 +274,8 @@ export async function saveCheckpoint({
   const checkpointPath = path.join(repository.project_path, CHECKPOINT_RELATIVE_PATH);
   const now = new Date().toISOString();
   const fullState = {
-    schema_version: 1,
     ...state,
+    schema_version: 2,
     paused_at: state.paused_at ?? now,
     repository,
   };
@@ -315,6 +318,10 @@ export async function saveCheckpoint({
       status: state.status.toLowerCase(),
       resume_after: state.resume_after ?? null,
       thread_reference: state.thread_reference ?? null,
+      ...(fullState.quota_snapshot ? {
+        quota_snapshot_id: fullState.quota_snapshot.snapshot_id ?? null,
+        quota_observed_at: fullState.quota_snapshot.observed_at ?? null,
+      } : {}),
       updated_at: now,
     };
     await writeRegistry(taskGuardHome, registry);

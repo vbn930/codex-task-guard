@@ -1,6 +1,6 @@
 interface:
   display_name: "Task Guard"
-  short_description: "Guard long Codex tasks across quota resets"
-  default_prompt: "Use $task-guard to protect this multi-phase task across quota checks, checkpointing, and same-thread resume."
+  short_description: "Use fresh quota snapshots for measured task phases"
+  default_prompt: "Use $task-guard to run this task with authoritative quota snapshots, measured phases, consistent checkpoints, and same-thread resume."
 policy:
   allow_implicit_invocation: true

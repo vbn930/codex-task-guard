@@ -61,12 +61,20 @@ export function normalizeQuotaResponse(
 
 const TEST_FIXTURES = {
   healthy: {
-    primary: { usedPercent: 20, windowDurationMins: FIVE_HOUR_MINUTES },
-    secondary: { usedPercent: 25, windowDurationMins: WEEK_MINUTES },
+    primary: {
+      usedPercent: 20,
+      windowDurationMins: FIVE_HOUR_MINUTES,
+      resetsAt: 1_800_000_000,
+    },
+    secondary: { usedPercent: 25, windowDurationMins: WEEK_MINUTES, resetsAt: 1_800_500_000 },
   },
   low: {
-    primary: { usedPercent: 95, windowDurationMins: FIVE_HOUR_MINUTES },
-    secondary: { usedPercent: 80, windowDurationMins: WEEK_MINUTES },
+    primary: {
+      usedPercent: 95,
+      windowDurationMins: FIVE_HOUR_MINUTES,
+      resetsAt: 1_800_000_000,
+    },
+    secondary: { usedPercent: 80, windowDurationMins: WEEK_MINUTES, resetsAt: 1_800_500_000 },
   },
   unavailable: {},
 };

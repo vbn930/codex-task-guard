@@ -31,4 +31,8 @@ No third-party package is bundled. The small app-server client structure was inf
 
 ## Confirmed MVP boundary
 
-The MVP contains quota JSON, project-local checkpoint plus global registry, repository fingerprint verification, optional Discord webhook notifications, skill instructions, and optional current-thread heartbeat use. It does not contain a daemon, database, MCP server, GUI, Discord bot, inbound commands, or reset-credit consumption.
+The MVP contains quota JSON, measured phase history, exact-cohort conservative budget evaluation, project-local checkpoint plus global registry, repository fingerprint verification, optional Discord webhook notifications, skill instructions, and optional current-thread heartbeat use. Official OpenAI guidance states that Codex usage varies with model, task complexity, context, reasoning, speed, tools, and execution location, but does not provide a deterministic task-to-percentage formula. Task Guard therefore treats general model guidance only as context and uses valid local measurements for automated selection.
+
+V1 does not contain a daemon, database, machine-learning predictor, cross-model extrapolation, automatic model routing, fixed percentile, GUI, Discord bot, inbound commands, or reset-credit consumption.
+
+Quota freshness uses process-per-boundary JIT `account/rateLimits/read` calls. Successful observations become timestamped `AUTHORITATIVE` snapshots; persisted last-known data is always labeled `STALE`, without an invented age threshold. Persistent app-server operation and `account/rateLimits/updated` subscription remain future optimizations.

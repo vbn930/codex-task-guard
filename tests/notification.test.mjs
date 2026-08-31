@@ -3,6 +3,24 @@ import test from "node:test";
 
 import { notifyDiscord } from "../scripts/lib/discord.mjs";
 
+function authoritativeSnapshot(remaining, observedAt, resetAt) {
+  return {
+    snapshot_id: `${observedAt}-${remaining}`,
+    source: "test_fixture",
+    observed_at: observedAt,
+    freshness: "AUTHORITATIVE",
+    availability: "PARTIAL",
+    five_hour: {
+      available: true,
+      used_percent: 100 - remaining,
+      remaining_percent: remaining,
+      window_duration_minutes: 300,
+      reset_at: resetAt,
+    },
+    weekly: { available: false },
+  };
+}
+
 test("gracefully disables Discord when the webhook environment variable is absent", async () => {
   let called = false;
   const result = await notifyDiscord(
@@ -27,6 +45,11 @@ test("sends a task started embed with working context", async () => {
       status: "Working",
     },
     {
+      snapshot: authoritativeSnapshot(
+        74,
+        "2026-08-31T08:00:00.000Z",
+        "2026-08-31T12:00:00Z",
+      ),
       env: { CODEX_DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/secret" },
       fetchImpl: async (_url, options) => {
         request = options;
@@ -53,6 +76,67 @@ test("sends a task started embed with working context", async () => {
   assert.match(embed.timestamp, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+test("quota-bearing Discord events use the authoritative snapshot instead of stale payload strings", async () => {
+  let request;
+  const snapshot = authoritativeSnapshot(
+    10,
+    "2026-08-31T12:24:00.000Z",
+    "2026-08-31T16:32:00.000Z",
+  );
+  const result = await notifyDiscord(
+    "TASK_STARTED",
+    {
+      project: "codex-task-guard",
+      task: "Freshness test",
+      thread: "Current thread",
+      quota: "16% remaining",
+      reset: "2026-08-31T15:00:00.000Z",
+      status: "Working",
+    },
+    {
+      snapshot,
+      env: { CODEX_DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/secret" },
+      fetchImpl: async (_url, options) => {
+        request = options;
+        return { ok: true, status: 204 };
+      },
+    },
+  );
+
+  const [embed] = JSON.parse(request.body).embeds;
+  const fields = Object.fromEntries(embed.fields.map(({ name, value }) => [name, value]));
+  assert.equal(fields["5h Quota"], "10% remaining");
+  assert.equal(fields["Next Reset"], "<t:1788193920:t> · <t:1788193920:R>");
+  assert.equal(result.quota_snapshot_id, snapshot.snapshot_id);
+  assert.equal(result.quota_observed_at, snapshot.observed_at);
+});
+
+test("Discord never presents a stale snapshot as current quota", async () => {
+  let request;
+  const stale = {
+    ...authoritativeSnapshot(16, "2026-08-31T12:20:00.000Z", "2026-08-31T15:00:00.000Z"),
+    freshness: "STALE",
+  };
+  await notifyDiscord(
+    "TASK_STARTED",
+    { project: "demo", task: "Stale test", thread: "Current", status: "Waiting" },
+    {
+      snapshot: stale,
+      env: { CODEX_DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/secret" },
+      fetchImpl: async (_url, options) => {
+        request = options;
+        return { ok: true, status: 204 };
+      },
+    },
+  );
+
+  const fields = Object.fromEntries(
+    JSON.parse(request.body).embeds[0].fields.map(({ name, value }) => [name, value]),
+  );
+  assert.equal(fields["5h Quota"], "Unavailable (stale snapshot)");
+  assert.equal("Next Reset" in fields, false);
+});
+
 test("sends a quota pause embed with local and relative reset time without exposing the webhook", async () => {
   let request;
   const result = await notifyDiscord(
@@ -68,6 +152,11 @@ test("sends a quota pause embed with local and relative reset time without expos
       status: "Waiting for quota reset",
     },
     {
+      snapshot: authoritativeSnapshot(
+        6,
+        "2026-08-31T11:20:00.000Z",
+        "2026-08-31T12:00:00Z",
+      ),
       env: { CODEX_DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/secret" },
       fetchImpl: async (url, options) => {
         request = { url, options };
@@ -76,7 +165,8 @@ test("sends a quota pause embed with local and relative reset time without expos
     },
   );
 
-  assert.deepEqual(result, { sent: true });
+  assert.equal(result.sent, true);
+  assert.equal(result.quota_observed_at, "2026-08-31T11:20:00.000Z");
   assert.equal(request.options.method, "POST");
   const body = JSON.parse(request.options.body);
   assert.equal(body.username, "Codex Task Guard");
@@ -116,6 +206,11 @@ test("sends a task resumed embed with checkpoint and repository verification", a
       status: "Working",
     },
     {
+      snapshot: authoritativeSnapshot(
+        100,
+        "2026-08-31T12:01:00.000Z",
+        "2026-08-31T12:00:00Z",
+      ),
       env: { CODEX_DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/secret" },
       fetchImpl: async (_url, options) => {
         request = options;
