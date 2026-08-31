@@ -55,12 +55,23 @@ Supported events are `TASK_STARTED`, `QUOTA_PAUSED`, `TASK_RESUMED`, `TASK_COMPL
 {
   "project": "project-name",
   "task": "Task 24",
-  "thread": "current",
   "reason": "5-hour quota low",
+  "five_hour_remaining": "5%",
   "checkpoint": "Saved",
   "reset": "2026-08-31T12:00:00.000Z",
+  "resume": "Same-thread automation scheduled",
   "status": "Waiting for quota reset"
 }
 ```
 
-Omit fields that do not apply to the event.
+`reset` accepts an ISO 8601 timestamp and is rendered as localized absolute and relative Discord timestamps. Omit fields that do not apply to the event. Use these event-specific fields in addition to `project` and `task`:
+
+| Event | Fields |
+|---|---|
+| `TASK_STARTED` | `thread`, `quota`, `reset`, `status` |
+| `QUOTA_PAUSED` | `reason`, `five_hour_remaining`, `reset`, `checkpoint`, `resume`, `status` |
+| `TASK_RESUMED` | `quota`, `reset`, `checkpoint`, `repository`, `resume_point`, `status` |
+| `TASK_COMPLETED` | `validation`, `quota_used`, `checkpoint`, `status` |
+| `TASK_BLOCKED` | `reason`, `detected`, `action_required`, `checkpoint`, `status` |
+
+For `TASK_RESUMED`, copy `resume_point` from the checkpoint's actual `exact_next_actions`. For `TASK_COMPLETED`, `quota_used` is displayed as **Quota Resets** and should use a compact value such as `1 × 5h window`; set `checkpoint` to `Cleared` only after checkpoint cleanup succeeds.

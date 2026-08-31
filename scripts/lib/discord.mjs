@@ -1,39 +1,136 @@
-const EVENT_TITLES = {
-  TASK_STARTED: "🚀 Codex Task Started",
-  QUOTA_PAUSED: "⏸️ Codex Task Paused",
-  TASK_RESUMED: "▶️ Codex Task Resumed",
-  TASK_COMPLETED: "✅ Codex Task Completed",
-  TASK_BLOCKED: "❌ Codex Task Blocked",
-};
-
-const FIELD_LABELS = [
-  ["project", "Project"],
-  ["task", "Task"],
-  ["thread", "Thread"],
-  ["reason", "Reason"],
-  ["checkpoint", "Checkpoint"],
-  ["reset", "Reset"],
-  ["validation", "Validation"],
-  ["action_required", "Action required"],
-  ["status", "Status"],
+const PAUSED_FIELDS = [
+  ["project", "Project", true, inlineCode],
+  ["task", "Task", true],
+  ["reason", "Reason", false],
+  ["five_hour_remaining", "5h Remaining", true, boldPercent],
+  ["reset", "Next Reset", true, timestampSummary],
+  ["checkpoint", "Checkpoint", true, (value) => withPrefix(value, "✅")],
+  ["resume", "Resume", true, (value) => withPrefix(value, "🔄")],
+  ["status", "Status", false],
 ];
+
+const STARTED_FIELDS = [
+  ["project", "Project", true, inlineCode],
+  ["task", "Task", true],
+  ["thread", "Thread", true],
+  ["quota", "5h Quota", true],
+  ["reset", "Next Reset", true, timestampSummary],
+  ["status", "Status", false],
+];
+
+const RESUMED_FIELDS = [
+  ["project", "Project", true, inlineCode],
+  ["task", "Task", true],
+  ["quota", "5h Quota", true],
+  ["reset", "Next Reset", true, timestampSummary],
+  ["checkpoint", "Checkpoint", true, (value) => withPrefix(value, "✅")],
+  ["repository", "Repository", true, (value) => withPrefix(value, "✅")],
+  ["resume_point", "Resume Point", false],
+  ["status", "Status", false],
+];
+
+const COMPLETED_FIELDS = [
+  ["project", "Project", true, inlineCode],
+  ["task", "Task", true],
+  ["validation", "Validation", false],
+  ["quota_used", "Quota Resets", true],
+  ["checkpoint", "Checkpoint", true, (value) => withPrefix(value, "✅")],
+  ["status", "Status", false],
+];
+
+const BLOCKED_FIELDS = [
+  ["project", "Project", true, inlineCode],
+  ["task", "Task", true],
+  ["reason", "Reason", false],
+  ["detected", "Detected", false, (value) => withPrefix(value, "⚠️")],
+  ["action_required", "Required Action", false],
+  ["checkpoint", "Checkpoint", true, (value) => withPrefix(value, "✅")],
+  ["status", "Status", false],
+];
+
+const EVENT_CONFIG = {
+  TASK_STARTED: {
+    title: "🚀 Codex Task Started",
+    description: "Task started and is ready for work.",
+    color: 0x5865f2,
+    fields: STARTED_FIELDS,
+  },
+  QUOTA_PAUSED: {
+    title: "⏸️ Codex Task Paused",
+    description: "Task paused safely before starting the next substantial implementation phase.",
+    color: 0xfee75c,
+    fields: PAUSED_FIELDS,
+  },
+  TASK_RESUMED: {
+    title: "▶️ Codex Task Resumed",
+    description: "Task resumed after checkpoint and repository verification.",
+    color: 0x3498db,
+    fields: RESUMED_FIELDS,
+  },
+  TASK_COMPLETED: {
+    title: "✅ Codex Task Completed",
+    description: "Task completed and passed its required validation.",
+    color: 0x57f287,
+    fields: COMPLETED_FIELDS,
+  },
+  TASK_BLOCKED: {
+    title: "❌ Codex Task Blocked",
+    description: "Task is blocked and requires attention before it can continue.",
+    color: 0xed4245,
+    fields: BLOCKED_FIELDS,
+  },
+};
 
 export function notificationsEnabled(env) {
   const value = env.TASK_GUARD_NOTIFICATION_ENABLED?.toLowerCase();
   return value !== "0" && value !== "false" && value !== "off";
 }
 
-function buildMessage(event, payload) {
-  const title = EVENT_TITLES[event];
-  if (!title) throw new Error(`Unsupported Discord event: ${event}`);
-  const lines = [title, ""];
-  for (const [key, label] of FIELD_LABELS) {
+function clean(value, limit = 1_024) {
+  return String(value).replaceAll("\u0000", "").slice(0, limit);
+}
+
+function inlineCode(value) {
+  return `\`${clean(value).replaceAll("`", "'")}\``;
+}
+
+function boldPercent(value) {
+  const text = clean(value).trim();
+  return text.startsWith("**") && text.endsWith("**") ? text : `**${text}**`;
+}
+
+function timestampSummary(value) {
+  const text = clean(value).trim();
+  const milliseconds = Date.parse(text);
+  if (Number.isNaN(milliseconds)) return text;
+  const seconds = Math.floor(milliseconds / 1_000);
+  return `<t:${seconds}:t> · <t:${seconds}:R>`;
+}
+
+function withPrefix(value, prefix) {
+  const text = clean(value).trim();
+  return text.startsWith(prefix) ? text : `${prefix} ${text}`;
+}
+
+function buildFields(definitions, payload) {
+  return definitions.flatMap(([key, name, inline, formatter = clean]) => {
     const value = payload[key];
-    if (value !== undefined && value !== null && value !== "") {
-      lines.push(`${label}: ${String(value).replaceAll("\n", " ")}`);
-    }
-  }
-  return lines.join("\n").slice(0, 2_000);
+    if (value === undefined || value === null || value === "") return [];
+    return [{ name, value: formatter(value), inline }];
+  });
+}
+
+function buildEmbed(event, payload) {
+  const config = EVENT_CONFIG[event];
+  if (!config) throw new Error(`Unsupported Discord event: ${event}`);
+  return {
+    title: config.title,
+    description: config.description,
+    color: config.color,
+    fields: buildFields(config.fields, payload),
+    footer: { text: "Codex Task Guard" },
+    timestamp: new Date().toISOString(),
+  };
 }
 
 export async function notifyDiscord(
@@ -60,7 +157,8 @@ export async function notifyDiscord(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        content: buildMessage(event, payload),
+        username: "Codex Task Guard",
+        embeds: [buildEmbed(event, payload)],
         allowed_mentions: { parse: [] },
       }),
       signal: AbortSignal.timeout(10_000),

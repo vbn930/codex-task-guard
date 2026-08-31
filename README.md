@@ -74,7 +74,17 @@ When the Codex app exposes a current-thread heartbeat automation tool, `SKILL.md
 
 ## Discord events
 
-Supported events are `TASK_STARTED`, `QUOTA_PAUSED`, `TASK_RESUMED`, `TASK_COMPLETED`, and `TASK_BLOCKED`. Notifications are plain, concise webhook messages. HTTP and network failures are reported without echoing the webhook URL and do not fail Task Guard.
+Supported events are `TASK_STARTED`, `QUOTA_PAUSED`, `TASK_RESUMED`, `TASK_COMPLETED`, and `TASK_BLOCKED`. Each notification uses a compact Discord Embed with an event-specific title, description, color, and fields:
+
+| Event | Color | Primary fields |
+|---|---|---|
+| `TASK_STARTED` | Blurple | Project, Task, Thread, 5h Quota, Next Reset, Status |
+| `QUOTA_PAUSED` | Yellow | Reason, 5h Remaining, Next Reset, Checkpoint, Resume, Status |
+| `TASK_RESUMED` | Blue | 5h Quota, Next Reset, Checkpoint, Repository, Resume Point, Status |
+| `TASK_COMPLETED` | Green | Validation, Quota Resets, Checkpoint, Status |
+| `TASK_BLOCKED` | Red | Reason, Detected, Required Action, Checkpoint, Status |
+
+An ISO 8601 `reset` value is rendered as both a localized absolute time and a relative time, such as `4:32 PM · in 4 hours`. `allowed_mentions` is always empty. HTTP and network failures are reported without echoing the webhook URL and do not fail Task Guard.
 
 ## Test
 

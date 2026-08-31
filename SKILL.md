@@ -25,7 +25,7 @@ Run `quota` at task start, before each substantial implementation phase, after a
 
 A confirmed rate-limit rejection from Codex always enters the pause flow, even when the follow-up quota read is healthy or unavailable. Use that read only to capture verified reset metadata; never use it to override the rejection and continue working.
 
-When beginning a new substantial task, send `TASK_STARTED` once after the initial quota read and before implementation. Do not repeat it at each phase.
+When beginning a new substantial task, send `TASK_STARTED` once after the initial quota read and before implementation. Include `project`, `task`, `thread`, the five-hour remaining value as `quota`, the verified five-hour `reset`, and `status`. Do not repeat it at each phase.
 
 Interpret only windows whose `window_duration_minutes` is exactly `300` or `10080`. An unavailable window stays unavailable. Never relabel the weekly window as five-hour quota, infer reset times, or invent missing percentages.
 
@@ -36,7 +36,7 @@ Classify the next decision as `SAFE`, `CAUTION`, `LOW`, or `UNKNOWN` using both 
 When quota is insufficient for the next substantial phase:
 
 1. Read [references/checkpoint-input.md](references/checkpoint-input.md), create the state JSON in a temporary location, and run `checkpoint save`. Do not report a successful pause unless the command exits successfully.
-2. Run `notify QUOTA_PAUSED` with a non-secret event JSON. Notification failure is non-fatal.
+2. Run `notify QUOTA_PAUSED` with a non-secret event JSON containing `project`, `task`, `reason`, `five_hour_remaining`, verified `reset`, `checkpoint`, `resume`, and `status`. Notification failure is non-fatal.
 3. If the Codex app current-thread heartbeat automation tool is available and a local run can keep the host powered on, the desktop app running, and the project available on disk, schedule this same thread with its first wake at or just after the verified five-hour reset. Its prompt must recheck quota, verify the checkpoint, clean up this heartbeat, resume the checkpoint, continue the exact next action, and avoid creating a new task. Capture the returned automation ID as `heartbeat_automation_id`, add it to the same state JSON, and run `checkpoint save` again. If the ID cannot be persisted, delete or disable the automation and use the fallback below. Do not invent an automation interface or schedule.
 4. If automation is unavailable, leave `resume_after` and the checkpoint path in the registry, tell the user how to resume this same thread, and stop the current execution.
 
@@ -46,13 +46,13 @@ The paused state is `PAUSED_FOR_QUOTA`, not completed or failed.
 
 Run `checkpoint verify` before doing more work. If it reports `REPOSITORY_STATE_CHANGED`, inspect `git status`, `git diff`, and the checkpoint; reconcile deliberately or send `TASK_BLOCKED`. Never overwrite external changes or trust the checkpoint over the filesystem.
 
-When verification succeeds, read `checkpoint show`. If it contains `heartbeat_automation_id`, delete or disable that automation before continuing and report any cleanup failure. Then run `checkpoint resume --project <project> --task-id <task-id>`, send `TASK_RESUMED`, and continue from `exact_next_actions`. Keep using the same thread.
+When verification succeeds, read `checkpoint show`. If it contains `heartbeat_automation_id`, delete or disable that automation before continuing and report any cleanup failure. Then run `checkpoint resume --project <project> --task-id <task-id>`, send `TASK_RESUMED` with the five-hour `quota`, verified five-hour `reset`, `checkpoint`, `repository`, the actual first `exact_next_actions` entry as `resume_point`, and `status`, and continue from `exact_next_actions`. Never use a generic resume-point description. Keep using the same thread.
 
 ## Complete or block
 
-Declare completion only after implementation, required tests, original acceptance criteria, and task-specific blockers are all resolved. If the checkpoint contains `heartbeat_automation_id`, delete or disable that automation and report any cleanup failure. Send `TASK_COMPLETED`, then run `checkpoint complete` to remove the active checkpoint and registry entry. Start a later task in a new thread.
+Declare completion only after implementation, required tests, original acceptance criteria, and task-specific blockers are all resolved. If the checkpoint contains `heartbeat_automation_id`, delete or disable that automation and report any cleanup failure. Run `checkpoint complete` to remove the active checkpoint and registry entry. Only after cleanup succeeds, send `TASK_COMPLETED` with `validation`, the verified reset count formatted like `1 × 5h window` as `quota_used`, `checkpoint` set to `Cleared`, and `status`. Use `Not required` instead of `Cleared` when no checkpoint existed. Start a later task in a new thread.
 
-For a genuine blocker, delete or disable any stored heartbeat automation, then send `TASK_BLOCKED` with the reason and required action. Do not clean the checkpoint while the original task remains incomplete.
+For a genuine blocker, delete or disable any stored heartbeat automation, then send `TASK_BLOCKED` with `reason`, `detected`, `action_required`, `checkpoint`, and `status`. Do not clean the checkpoint while the original task remains incomplete.
 
 ## Security and failure rules
 
