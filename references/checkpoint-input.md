@@ -39,6 +39,8 @@ node <skill-root>/scripts/task-guard.mjs checkpoint save --project <project> --i
 
 The utility writes `<project>/.codex/task-guard-checkpoint.md`, adds it to the repository-local Git exclude file, and stores minimal lookup metadata under the Codex home directory.
 
+Only one `WORKING` or `PAUSED_FOR_QUOTA` task may own a repository checkpoint. Saving a different `task_id` while one is active fails with `ACTIVE_CHECKPOINT_EXISTS` and leaves the first checkpoint untouched. Re-saving the same `task_id`, including after adding `heartbeat_automation_id`, remains supported.
+
 Omit `heartbeat_automation_id` when no wake-up automation was created. When an automation is created after the initial save, add its returned ID to the same state JSON and save again. On a verified resume, mark the task as working with:
 
 ```text

@@ -71,3 +71,19 @@ test("notify command succeeds as a disabled optional feature", async () => {
   assert.equal(result.status, 0);
   assert.deepEqual(JSON.parse(result.stdout), { sent: false, reason: "DISABLED" });
 });
+
+test("doctor command reports a healthy deterministic preflight", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "task-guard-doctor-cli-"));
+  const project = path.join(root, "project");
+  execFileSync("git", ["init", "-q", project]);
+
+  const result = run(["doctor", "--project", project], {
+    env: { TASK_GUARD_TEST_DOCTOR: "healthy" },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.ok, true);
+  assert.equal(output.checks.find(({ id }) => id === "codex_cli").status, "ok");
+  assert.equal(output.checks.find(({ id }) => id === "checkpoint_path").status, "ok");
+});

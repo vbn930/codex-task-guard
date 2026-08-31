@@ -278,10 +278,36 @@ export async function saveCheckpoint({
   };
 
   await ensureLocalGitExclude(repository.project_path);
-  await atomicWrite(checkpointPath, renderCheckpoint(fullState));
 
   await withRegistryLock(taskGuardHome, async () => {
+    let checkpointOwner = null;
+    try {
+      checkpointOwner = await readCheckpoint(checkpointPath);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    if (
+      checkpointOwner
+      && checkpointOwner.task_id !== state.task_id
+      && ["working", "paused_for_quota"].includes(checkpointOwner.status?.toLowerCase())
+    ) {
+      throw new Error(
+        `ACTIVE_CHECKPOINT_EXISTS: repository already has active task ${checkpointOwner.task_id}`,
+      );
+    }
+
     const registry = await listRegistry({ taskGuardHome });
+    const projectKey = repository.project_path.toLowerCase();
+    for (const [key, entry] of Object.entries(registry.tasks)) {
+      if (
+        entry.task_id !== state.task_id
+        && entry.project_path?.toLowerCase() === projectKey
+      ) {
+        delete registry.tasks[key];
+      }
+    }
+
+    await atomicWrite(checkpointPath, renderCheckpoint(fullState));
     registry.tasks[registryKey(repository.project_path, state.task_id)] = {
       task_id: state.task_id,
       project_path: repository.project_path,

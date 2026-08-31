@@ -18,7 +18,7 @@ const FIELD_LABELS = [
   ["status", "Status"],
 ];
 
-function notificationsEnabled(env) {
+export function notificationsEnabled(env) {
   const value = env.TASK_GUARD_NOTIFICATION_ENABLED?.toLowerCase();
   return value !== "0" && value !== "false" && value !== "off";
 }

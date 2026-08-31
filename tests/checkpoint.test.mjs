@@ -288,3 +288,111 @@ test("reads checkpoints written with the original JSON machine-state format", as
 
   assert.deepEqual(await readCheckpoint(checkpointPath), state);
 });
+
+test("rejects a second active task in the same repository without overwriting the first", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const first = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-first",
+      task_description: "Keep the first task active",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Resume the first task"],
+    },
+  });
+
+  await assert.rejects(
+    saveCheckpoint({
+      projectPath,
+      taskGuardHome,
+      state: {
+        task_id: "task-second",
+        task_description: "Do not overwrite the first task",
+        status: "PAUSED_FOR_QUOTA",
+        exact_next_actions: ["Resume the second task"],
+      },
+    }),
+    /ACTIVE_CHECKPOINT_EXISTS.*task-first/,
+  );
+
+  assert.equal((await readCheckpoint(first.checkpoint_path)).task_id, "task-first");
+  assert.equal(Object.keys((await listRegistry({ taskGuardHome })).tasks).length, 1);
+
+  await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-first",
+      task_description: "Keep the first task active",
+      status: "PAUSED_FOR_QUOTA",
+      heartbeat_automation_id: "heartbeat-1",
+      exact_next_actions: ["Resume the first task"],
+    },
+  });
+  assert.equal(
+    (await readCheckpoint(first.checkpoint_path)).heartbeat_automation_id,
+    "heartbeat-1",
+  );
+});
+
+test("rejects a second active task even when the global registry entry is missing", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const first = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-file-owner",
+      task_description: "Preserve checkpoint ownership",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Resume the owner"],
+    },
+  });
+  await rm(path.join(taskGuardHome, "index.json"));
+
+  await assert.rejects(
+    saveCheckpoint({
+      projectPath,
+      taskGuardHome,
+      state: {
+        task_id: "task-file-contender",
+        task_description: "Do not replace an orphaned active checkpoint",
+        status: "PAUSED_FOR_QUOTA",
+        exact_next_actions: ["Continue"],
+      },
+    }),
+    /ACTIVE_CHECKPOINT_EXISTS.*task-file-owner/,
+  );
+
+  assert.equal((await readCheckpoint(first.checkpoint_path)).task_id, "task-file-owner");
+});
+
+test("replaces a stale registry entry when its checkpoint file is missing", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const first = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-stale-owner",
+      task_description: "Lose the old checkpoint",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Resume"],
+    },
+  });
+  await rm(first.checkpoint_path);
+
+  const second = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-replacement",
+      task_description: "Replace stale ownership",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Continue"],
+    },
+  });
+
+  assert.equal((await readCheckpoint(second.checkpoint_path)).task_id, "task-replacement");
+  const entries = Object.values((await listRegistry({ taskGuardHome })).tasks);
+  assert.deepEqual(entries.map(({ task_id }) => task_id), ["task-replacement"]);
+});

@@ -1,6 +1,6 @@
 # Codex Task Guard
 
-`task-guard` keeps one long Codex task in one thread across quota pauses. It reads the current five-hour and weekly windows from Codex app-server, saves a recoverable project checkpoint, verifies repository state before resume, and sends optional outbound Discord webhook notifications.
+`task-guard` keeps one long Codex task in one thread across quota pauses. Codex is instructed through `AGENTS.md` and this skill to invoke the provided quota, checkpoint, and notification utilities; this is agent-driven orchestration, not a deterministic lifecycle hook. The utilities read the current five-hour and weekly windows from Codex app-server, save a recoverable project checkpoint, verify repository state before resume, and send optional outbound Discord webhook notifications.
 
 It is intentionally small: Node.js 20+, no runtime dependencies, no daemon, no database, no MCP server, and no Discord bot.
 
@@ -24,10 +24,19 @@ node scripts/install.mjs
 
 This copies the skill to `%CODEX_HOME%\skills\task-guard` or `%USERPROFILE%\.codex\skills\task-guard` and adds an idempotent Task Guard policy block to the global `AGENTS.md`. Restart Codex or start a new task so skill discovery reloads.
 
+Then verify the local prerequisites and signed-in Codex session:
+
+```text
+node scripts/task-guard.mjs doctor --project C:\path\to\git-project
+```
+
+The command returns JSON and exits nonzero when a required check fails. An unconfigured Discord webhook is only a warning because notifications are optional.
+
 ## Commands
 
 ```text
 node scripts/task-guard.mjs quota
+node scripts/task-guard.mjs doctor --project C:\path\to\project
 node scripts/task-guard.mjs checkpoint save --project C:\path\to\project --input state.json
 node scripts/task-guard.mjs checkpoint verify --project C:\path\to\project
 node scripts/task-guard.mjs checkpoint show --project C:\path\to\project
@@ -59,9 +68,9 @@ Only exact 300-minute and 10,080-minute windows are labeled five-hour and weekly
 
 The readable checkpoint is `<project>/.codex/task-guard-checkpoint.md`. Task Guard resolves Git's effective repository-local exclude path, including linked worktrees, and leaves tracked `.gitignore` untouched. The global registry is `%CODEX_HOME%\task-guard\index.json` or `%USERPROFILE%\.codex\task-guard\index.json` and stores only lookup metadata. Registry updates are serialized across concurrent projects. `checkpoint list` audits those paths and marks missing checkpoint files as stale.
 
-At pause, the checkpoint records completed work, current state, decisions, tests, issues, remaining work, exact next actions, quota, timestamps, and a repository fingerprint. At resume, Task Guard re-hashes HEAD, streamed staged/unstaged diffs, status, and untracked file contents without following symbolic links. A mismatch returns `REPOSITORY_STATE_CHANGED`; it never overwrites the repository. `checkpoint resume` then records `WORKING` in both the checkpoint and registry.
+At pause, the checkpoint records completed work, current state, decisions, tests, issues, remaining work, exact next actions, quota, timestamps, and a repository fingerprint. At resume, Task Guard re-hashes HEAD, streamed staged/unstaged diffs, status, and untracked file contents without following symbolic links. A mismatch returns `REPOSITORY_STATE_CHANGED`; it never overwrites the repository. `checkpoint resume` then records `WORKING` in both the checkpoint and registry. A repository can have only one `WORKING` or `PAUSED_FOR_QUOTA` task; saving another task returns `ACTIVE_CHECKPOINT_EXISTS` without replacing the existing checkpoint.
 
-When the Codex app exposes a current-thread heartbeat automation tool, `SKILL.md` directs the agent to use it at the verified reset time, persist its ID, and delete or disable it on resume, completion, or blockage. Otherwise the checkpoint and `resume_after` provide a manual same-thread fallback.
+When the Codex app exposes a current-thread heartbeat automation tool, `SKILL.md` directs the agent to use it at the verified reset time, persist its ID, and delete or disable it on resume, completion, or blockage. Otherwise the checkpoint and `resume_after` provide a manual same-thread fallback. For a scheduled run that needs local project files, [official OpenAI documentation](https://learn.chatgpt.com/docs/automations) says to keep the computer powered on and the desktop app running.
 
 ## Discord events
 
@@ -83,7 +92,10 @@ Delete `%CODEX_HOME%\skills\task-guard` (or `%USERPROFILE%\.codex\skills\task-gu
 
 ## Known limitations
 
+- Skill invocation and pause/resume decisions are agent-driven; Task Guard is not a deterministic Codex lifecycle hook.
 - Same-thread wake-up depends on the current Codex app exposing its heartbeat automation tool; it is not implemented through an assumed private API.
+- Local scheduled resume requires the host computer to remain powered on, the desktop app to remain running, and the project to remain available on disk. System sleep, hibernation, shutdown, or closing the app can delay the run, so use the manual same-thread fallback when those conditions cannot be maintained.
+- Quota and `doctor` require the Codex CLI on `PATH`; Codex Desktop alone is not sufficient for the app-server quota probe.
 - App-server startup can take tens of seconds on the first read.
 - `UNKNOWN` quota requires human/agent judgment about whether to continue; the utility does not apply a blind percentage threshold.
 - Checkpoint projects must be Git repositories.

@@ -9,6 +9,8 @@ metadata:
 
 Treat one user task as one Codex thread. A quota reset is a pause/resume boundary, never a task boundary. Do not create a new thread, mark the task complete, or discard its goal merely because quota is low or an implementation phase failed.
 
+This workflow is agent-driven rather than a deterministic lifecycle hook. Follow the checkpoints explicitly; do not claim that the JavaScript utilities detect task starts or pause Codex by themselves.
+
 Resolve `<skill-root>` to the directory containing this file. Run utilities as:
 
 ```text
@@ -16,6 +18,8 @@ node <skill-root>/scripts/task-guard.mjs <command>
 ```
 
 ## Before substantial work
+
+On first use, after installation, or when quota repeatedly returns `UNKNOWN`, run `doctor --project <project>`. Required errors must be resolved before relying on automatic quota resume. A Discord warning is non-blocking because notifications are optional.
 
 Run `quota` at task start, before each substantial implementation phase, after a phase when more substantial work remains, and immediately after a rate-limit error. This uses Codex app-server and does not send a model prompt.
 
@@ -33,7 +37,7 @@ When quota is insufficient for the next substantial phase:
 
 1. Read [references/checkpoint-input.md](references/checkpoint-input.md), create the state JSON in a temporary location, and run `checkpoint save`. Do not report a successful pause unless the command exits successfully.
 2. Run `notify QUOTA_PAUSED` with a non-secret event JSON. Notification failure is non-fatal.
-3. If the Codex app current-thread heartbeat automation tool is available, schedule this same thread with its first wake at or just after the verified five-hour reset. Its prompt must recheck quota, verify the checkpoint, clean up this heartbeat, resume the checkpoint, continue the exact next action, and avoid creating a new task. Capture the returned automation ID as `heartbeat_automation_id`, add it to the same state JSON, and run `checkpoint save` again. If the ID cannot be persisted, delete or disable the automation and use the fallback below. Do not invent an automation interface or schedule.
+3. If the Codex app current-thread heartbeat automation tool is available and a local run can keep the host powered on, the desktop app running, and the project available on disk, schedule this same thread with its first wake at or just after the verified five-hour reset. Its prompt must recheck quota, verify the checkpoint, clean up this heartbeat, resume the checkpoint, continue the exact next action, and avoid creating a new task. Capture the returned automation ID as `heartbeat_automation_id`, add it to the same state JSON, and run `checkpoint save` again. If the ID cannot be persisted, delete or disable the automation and use the fallback below. Do not invent an automation interface or schedule.
 4. If automation is unavailable, leave `resume_after` and the checkpoint path in the registry, tell the user how to resume this same thread, and stop the current execution.
 
 The paused state is `PAUSED_FOR_QUOTA`, not completed or failed.
@@ -55,5 +59,6 @@ For a genuine blocker, delete or disable any stored heartbeat automation, then s
 - Read Discord credentials only from `CODEX_DISCORD_WEBHOOK_URL`; never put them in input JSON, checkpoints, source, logs, or messages.
 - If Discord is disabled or fails, continue the task lifecycle and report only the notification result.
 - If checkpoint writing fails, the pause failed; retain the current task state and report the error.
+- If checkpoint save reports `ACTIVE_CHECKPOINT_EXISTS`, do not overwrite it. Resume or complete the existing task, or ask the user which task should retain the repository checkpoint.
 - If quota reading fails, report `UNKNOWN`; do not convert the failure into `SAFE` or `LOW`.
 - Do not consume rate-limit reset credits. This skill is read-only with respect to account quota.

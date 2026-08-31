@@ -11,6 +11,7 @@ import {
   verifyCheckpoint,
 } from "./lib/checkpoint.mjs";
 import { notifyDiscord } from "./lib/discord.mjs";
+import { runDoctor } from "./lib/doctor.mjs";
 import { normalizeQuotaResponse, quotaFromTestFixture } from "./lib/quota.mjs";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
@@ -112,13 +113,28 @@ async function notifyCommand(args) {
   return 0;
 }
 
+async function doctorCommand(args) {
+  const projectPath = optionValue(args, "--project") ?? process.cwd();
+  const testFixture = process.env.TASK_GUARD_TEST_DOCTOR;
+  const options = { projectPath };
+  if (testFixture === "healthy") {
+    options.nodeVersion = "20.0.0";
+    options.commandRunner = async (command) => `${command} test fixture`;
+    options.quotaReader = async () => quotaFromTestFixture("healthy");
+  }
+  const result = await runDoctor(options);
+  printJson(result);
+  return result.ok ? 0 : 4;
+}
+
 function printHelp() {
-  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint resume --project PATH --task-id ID\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
+  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  doctor [--project PATH]\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint resume --project PATH --task-id ID\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
 }
 
 export async function main(argv = process.argv.slice(2)) {
   const [command] = argv;
   if (command === "quota") return quotaCommand();
+  if (command === "doctor") return doctorCommand(argv.slice(1));
   if (command === "checkpoint") return checkpointCommand(argv.slice(1));
   if (command === "notify") return notifyCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") {
