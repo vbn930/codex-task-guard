@@ -37,12 +37,16 @@ The command returns JSON and exits nonzero when a required check fails. An uncon
 ```text
 node scripts/task-guard.mjs quota
 node scripts/task-guard.mjs doctor --project C:\path\to\project
+node scripts/task-guard.mjs phase prepare --project C:\path\to\project --input budget.json
 node scripts/task-guard.mjs phase start --project C:\path\to\project --input phase.json
 node scripts/task-guard.mjs phase complete --project C:\path\to\project --phase-id implementation --concurrent-usage false
 node scripts/task-guard.mjs phase finish --project C:\path\to\project --phase-id implementation --input decision.json
 node scripts/task-guard.mjs history list --limit 100
 node scripts/task-guard.mjs budget evaluate --input budget.json
 node scripts/task-guard.mjs pause prepare --project C:\path\to\project --input pause.json
+node scripts/task-guard.mjs resume prepare --project C:\path\to\project --task-id task-24 --input resume.json
+node scripts/task-guard.mjs checkpoint heartbeat set --project C:\path\to\project --task-id task-24 --automation-id automation-id
+node scripts/task-guard.mjs checkpoint heartbeat clear --project C:\path\to\project --task-id task-24
 node scripts/task-guard.mjs checkpoint save --project C:\path\to\project --input state.json
 node scripts/task-guard.mjs checkpoint verify --project C:\path\to\project
 node scripts/task-guard.mjs checkpoint show --project C:\path\to\project
@@ -74,15 +78,17 @@ Every read is wrapped as a timestamped quota snapshot with `source`, `observed_a
 
 ## Quota-budgeted phases
 
-The task remains the thread-level goal. The agent decomposes it into dependency-aware phases and measures every executed phase with `phase start` and `phase complete`. `phase finish` is the critical-boundary command: it performs one JIT refresh, records the after measurement, evaluates the next phases, and optionally builds a Discord notification from that same snapshot. Measurements include before/after snapshot IDs, sources, observation times, reset identity, and concurrency quality; they contain no source contents or repository paths.
+The task remains the thread-level goal. The agent decomposes it into dependency-aware phases. `phase prepare` is the default start boundary: it performs one JIT refresh, evaluates the budget, and records only the selected phase start from that same snapshot. A no-fit decision creates no active phase. `phase start` and `budget evaluate` remain manual diagnostics. `phase finish` is the completion boundary: it performs one JIT refresh, records the after measurement, evaluates the next phases, and optionally builds a Discord notification from that same snapshot. Measurements include before/after snapshot IDs, sources, observation times, reset identity, and concurrency quality; they contain no source contents or repository paths.
 
-V1 estimates only an exact plan/model/reasoning/phase-type cohort. Samples are excluded when a reset crossed the phase, concurrent usage occurred or is unknown, or the integer quota reading did not move. The conservative estimate is the highest valid observed percentage-point delta. With no valid cohort, Task Guard returns `INSUFFICIENT_HISTORY` instead of inventing a cost. `budget evaluate` subtracts the caller-provided safety reserve from live five-hour quota and selects the first dependency-ready phase whose observed upper cost fits.
+V1 estimates only an exact plan/model/reasoning/phase-type cohort. Samples are excluded when a reset crossed the phase, concurrent usage occurred or is unknown, or the integer quota reading did not move. The conservative estimate is the highest valid observed percentage-point delta. With no valid cohort, Task Guard returns `INSUFFICIENT_HISTORY` instead of inventing a cost. Both `phase prepare` and diagnostic `budget evaluate` subtract the caller-provided safety reserve from live five-hour quota and select the first dependency-ready phase whose observed upper cost fits.
 
 ## Checkpoint and resume
 
 The readable checkpoint is `<project>/.codex/task-guard-checkpoint.md`. Task Guard resolves Git's effective repository-local exclude path, including linked worktrees, and leaves tracked `.gitignore` untouched. The global registry is `%CODEX_HOME%\task-guard\index.json` or `%USERPROFILE%\.codex\task-guard\index.json` and stores only lookup metadata. Registry updates are serialized across concurrent projects. `checkpoint list` audits those paths and marks missing checkpoint files as stale.
 
-At quota pause, `pause prepare` refreshes once and uses the same snapshot reset for checkpoint schema v2, registry, Discord, and returned automation scheduling input. Schema-v1 checkpoints and registry entries remain readable. At resume, Task Guard re-hashes HEAD, streamed staged/unstaged diffs, status, and untracked file contents without following symbolic links. A mismatch returns `REPOSITORY_STATE_CHANGED`; it never overwrites the repository.
+At quota pause, `pause prepare` attempts one refresh and always attempts checkpoint schema-v2 preservation. Only an authoritative five-hour snapshot with a verified reset produces scheduling input; otherwise it stores an unavailable snapshot, clears `resume_after`, reports manual resume, and never promotes cached quota/reset metadata to current. Schema-v1 checkpoints and registry entries remain readable.
+
+Heartbeat IDs are attached with `checkpoint heartbeat set` and removed with `checkpoint heartbeat clear`; these narrow patches preserve every other checkpoint field. `resume prepare` owns one authoritative snapshot across repository verification, checkpoint resume, `TASK_RESUMED`, and an optional immediate next budget decision. Task Guard re-hashes HEAD, streamed staged/unstaged diffs, status, and untracked file contents without following symbolic links. A mismatch returns `TASK_BLOCKED` with `REPOSITORY_STATE_CHANGED`, leaves the checkpoint incomplete, and never overwrites the repository or transitions it to working.
 
 When the Codex app exposes a current-thread heartbeat automation tool, `SKILL.md` directs the agent to use it at the verified reset time, persist its ID, and delete or disable it on resume, completion, or blockage. Otherwise the checkpoint and `resume_after` provide a manual same-thread fallback. For a scheduled run that needs local project files, [official OpenAI documentation](https://learn.chatgpt.com/docs/automations) says to keep the computer powered on and the desktop app running.
 
@@ -98,7 +104,7 @@ Supported events are `TASK_STARTED`, `QUOTA_PAUSED`, `TASK_RESUMED`, `TASK_COMPL
 | `TASK_COMPLETED` | Green | Validation, Quota Resets, Checkpoint, Status |
 | `TASK_BLOCKED` | Red | Reason, Detected, Required Action, Checkpoint, Status |
 
-Quota-bearing events perform a JIT refresh and derive quota/reset fields from that authoritative snapshot, ignoring stale caller strings. A failed refresh displays quota as unavailable and does not reuse a cached reset. ISO reset values are rendered as localized absolute and relative times. `allowed_mentions` is always empty.
+Lifecycle commands own quota refresh and pass their snapshot to Discord; the formatter and transport never reread quota. Standalone `notify TASK_STARTED`, `notify QUOTA_PAUSED`, or `notify TASK_RESUMED` wrappers may perform their own JIT refresh. Quota/reset fields are derived from the owned authoritative snapshot, ignoring stale caller strings. A failed refresh displays quota as unavailable and does not reuse a cached reset. ISO reset values are rendered as localized absolute and relative times. `allowed_mentions` is always empty.
 
 ## Test
 
@@ -118,6 +124,7 @@ Delete `%CODEX_HOME%\skills\task-guard` (or `%USERPROFILE%\.codex\skills\task-gu
 
 - Skill invocation and pause/resume decisions are agent-driven; Task Guard is not a deterministic Codex lifecycle hook.
 - Same-thread wake-up depends on the current Codex app exposing its heartbeat automation tool; it is not implemented through an assumed private API.
+- The CLI cannot delete a Codex app automation itself. `resume prepare` requires `heartbeat_cleanup_confirmed: true` only after the app-layer deletion or disable operation succeeds.
 - Local scheduled resume requires the host computer to remain powered on, the desktop app to remain running, and the project to remain available on disk. System sleep, hibernation, shutdown, or closing the app can delay the run, so use the manual same-thread fallback when those conditions cannot be maintained.
 - Quota and `doctor` require the Codex CLI on `PATH`; Codex Desktop alone is not sufficient for the app-server quota probe.
 - App-server startup can take tens of seconds on the first read.

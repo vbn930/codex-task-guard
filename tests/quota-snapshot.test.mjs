@@ -8,6 +8,7 @@ import { normalizeQuotaResponse } from "../scripts/lib/quota.mjs";
 import {
   QuotaSnapshotStore,
   validateFreshness,
+  validateVerifiedFiveHourReset,
 } from "../scripts/lib/quota-snapshot.mjs";
 
 test("refresh creates and records an authoritative timestamped quota snapshot", async () => {
@@ -96,4 +97,29 @@ test("an authoritative observation keeps a missing five-hour window unavailable"
   assert.equal(snapshot.availability, "UNAVAILABLE");
   assert.deepEqual(snapshot.five_hour, { available: false });
   assert.throws(() => validateFreshness(snapshot), /FIVE_HOUR_QUOTA_UNAVAILABLE/);
+});
+
+test("reset validation distinguishes freshness window and reset failures", () => {
+  assert.throws(
+    () => validateVerifiedFiveHourReset({ freshness: "STALE" }),
+    /AUTHORITATIVE_QUOTA_REQUIRED/,
+  );
+  assert.throws(
+    () => validateVerifiedFiveHourReset({
+      freshness: "AUTHORITATIVE",
+      five_hour: { available: false },
+    }),
+    /FIVE_HOUR_QUOTA_UNAVAILABLE/,
+  );
+  assert.throws(
+    () => validateVerifiedFiveHourReset({
+      freshness: "AUTHORITATIVE",
+      five_hour: {
+        available: true,
+        window_duration_minutes: 300,
+        reset_at: null,
+      },
+    }),
+    /VERIFIED_FIVE_HOUR_RESET_REQUIRED/,
+  );
 });

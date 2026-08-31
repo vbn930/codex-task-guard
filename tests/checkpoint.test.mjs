@@ -12,6 +12,7 @@ import {
   readCheckpoint,
   resumeTask,
   saveCheckpoint,
+  setCheckpointHeartbeat,
   verifyCheckpoint,
 } from "../scripts/lib/checkpoint.mjs";
 
@@ -271,6 +272,45 @@ test("resuming a checkpoint marks both checkpoint and registry as working", asyn
   assert.equal(registryEntry.status, "working");
   assert.equal(registryEntry.resume_after, null);
   assert.equal(result.heartbeat_automation_id, "automation-123");
+});
+
+test("heartbeat patch preserves every existing pause field", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-heartbeat-patch",
+      task_description: "Attach a heartbeat without rebuilding pause state",
+      status: "PAUSED_FOR_QUOTA",
+      quota_snapshot: {
+        snapshot_id: "snapshot-A",
+        observed_at: "2026-08-31T12:24:00.000Z",
+        freshness: "AUTHORITATIVE",
+        five_hour: { available: true, remaining_percent: 6 },
+      },
+      resume_after: "2026-08-31T16:32:00.000Z",
+      exact_next_actions: ["Resume the exact implementation step"],
+      thread_reference: "current",
+      pause_reason: "Quota exhausted",
+    },
+  });
+  const before = await readCheckpoint(saved.checkpoint_path);
+
+  const result = await setCheckpointHeartbeat({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-heartbeat-patch",
+    automationId: "automation-123",
+  });
+
+  const after = await readCheckpoint(saved.checkpoint_path);
+  const expected = structuredClone(before);
+  expected.heartbeat_automation_id = "automation-123";
+  assert.deepEqual(after, expected);
+  assert.equal(result.heartbeat_automation_id, "automation-123");
+  const [registryEntry] = Object.values((await listRegistry({ taskGuardHome })).tasks);
+  assert.equal(registryEntry.heartbeat_automation_id, "automation-123");
 });
 
 test("reads checkpoints written with the original JSON machine-state format", async () => {

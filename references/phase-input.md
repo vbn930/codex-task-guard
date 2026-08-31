@@ -2,7 +2,7 @@
 
 Task Guard treats the task as the thread-level goal and phases as dependency-safe execution units. Phase files contain metadata only; never include prompts, source code, diffs, credentials, or webhook URLs.
 
-## Start and complete a phase
+## Prepare and complete a phase
 
 ```json
 {
@@ -21,8 +21,25 @@ Task Guard treats the task as the thread-level goal and phases as dependency-saf
 
 Required fields are `task_id`, `phase_id`, `phase_type`, `model`, and `reasoning_effort`. `plan` is a history partition key rather than a direct cost multiplier. Use active session values when exposed; otherwise record `unknown` rather than presenting configuration defaults as verified session state.
 
+For the default automated start boundary, put this metadata on every candidate in the budget input below and run:
+
 ```text
-node <skill-root>/scripts/task-guard.mjs phase start --project <project> --input <phase.json>
+node <skill-root>/scripts/task-guard.mjs phase prepare --project <project> --input <budget.json>
+```
+
+`phase prepare` performs exactly one authoritative refresh, evaluates the candidates, and starts only the selected phase with that same snapshot. These IDs are identical:
+
+```text
+snapshot.snapshot_id
+decision.quota_snapshot_id
+phase_start.quota_before_snapshot_id
+```
+
+If no candidate fits, `selected_phase_id` and `phase_start` are null and no active phase file is created. `phase start --project <project> --input <phase.json>` remains available for deliberately bounded calibration or manual diagnostics, not as the second half of an automated `budget evaluate` flow.
+
+Complete a phase with:
+
+```text
 node <skill-root>/scripts/task-guard.mjs phase complete --project <project> --phase-id <phase-id> --concurrent-usage false
 ```
 
@@ -35,6 +52,7 @@ node <skill-root>/scripts/task-guard.mjs phase complete --project <project> --ph
   "safety_reserve_percent": 5,
   "phases": [
     {
+      "task_id": "task-24",
       "phase_id": "formatter-implementation",
       "phase_type": "implementation",
       "model": "gpt-5.6-sol",
@@ -43,6 +61,7 @@ node <skill-root>/scripts/task-guard.mjs phase complete --project <project> --ph
       "dependencies_met": true
     },
     {
+      "task_id": "task-24",
       "phase_id": "integration-tests",
       "phase_type": "testing",
       "model": "gpt-5.6-sol",
@@ -55,9 +74,9 @@ node <skill-root>/scripts/task-guard.mjs phase complete --project <project> --ph
 ```
 
 ```text
-node <skill-root>/scripts/task-guard.mjs budget evaluate --input <budget.json>
+node <skill-root>/scripts/task-guard.mjs phase prepare --project <project> --input <budget.json>
 ```
 
-The command reads live quota, computes `available_budget = remaining_percent - safety_reserve_percent`, and evaluates exact plan/model/reasoning/phase-type cohorts. V1 uses the highest valid observed delta as `estimated_upper_cost`. It selects the first dependency-ready phase that fits. A phase with no valid nonzero samples returns `INSUFFICIENT_HISTORY`; split or deliberately calibrate it instead of inventing a cost.
+The command reads live quota once, computes `available_budget = remaining_percent - safety_reserve_percent`, and evaluates exact plan/model/reasoning/phase-type cohorts. V1 uses the highest valid observed delta as `estimated_upper_cost`. It selects the first dependency-ready phase that fits and records its start from that same quota snapshot. A phase with no valid nonzero samples returns `INSUFFICIENT_HISTORY`; split or deliberately calibrate it instead of inventing a cost. `budget evaluate --input <budget.json>` remains a standalone diagnostic that does not start a phase.
 
 When a next-phase decision follows completion, use the same JSON shape plus `"concurrent_usage": "false"` with `phase finish`. It performs one authoritative refresh and returns `snapshot`, `measurement`, and `decision` sharing one `snapshot_id`. History records `quota_before_observed_at`, `quota_after_observed_at`, reset identity, `concurrency_status`, `measurement_confidence`, and `external_usage_possible`. A direct delta is recorded only for a verified identical reset window.

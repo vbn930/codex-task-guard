@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -59,6 +59,40 @@ test("checkpoint CLI saves, verifies, and reports a later repository conflict", 
   const conflict = run(["checkpoint", "verify", "--checkpoint", checkpointPath], { env });
   assert.equal(conflict.status, 3);
   assert.equal(JSON.parse(conflict.stdout).reason, "REPOSITORY_STATE_CHANGED");
+});
+
+test("checkpoint heartbeat CLI patches and clears only the automation id", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "task-guard-heartbeat-cli-"));
+  const project = path.join(root, "project");
+  const home = path.join(root, "global");
+  const input = path.join(root, "checkpoint-input.json");
+  execFileSync("git", ["init", "-q", project]);
+  await writeFile(input, JSON.stringify({
+    task_id: "heartbeat-cli-task",
+    task_description: "Patch heartbeat through the CLI",
+    status: "PAUSED_FOR_QUOTA",
+    resume_after: "2026-08-31T16:32:00.000Z",
+    exact_next_actions: ["Continue exactly here"],
+  }));
+  const env = { TASK_GUARD_HOME: home };
+  const saved = run([
+    "checkpoint", "save", "--project", project, "--input", input,
+  ], { env });
+  assert.equal(saved.status, 0, saved.stderr);
+
+  const attached = run([
+    "checkpoint", "heartbeat", "set", "--project", project,
+    "--task-id", "heartbeat-cli-task", "--automation-id", "automation-123",
+  ], { env });
+  assert.equal(attached.status, 0, attached.stderr);
+  assert.equal(JSON.parse(attached.stdout).heartbeat_automation_id, "automation-123");
+
+  const cleared = run([
+    "checkpoint", "heartbeat", "clear", "--project", project,
+    "--task-id", "heartbeat-cli-task",
+  ], { env });
+  assert.equal(cleared.status, 0, cleared.stderr);
+  assert.equal(JSON.parse(cleared.stdout).heartbeat_automation_id, null);
 });
 
 test("notify command succeeds as a disabled optional feature", async () => {
@@ -151,6 +185,48 @@ test("phase lifecycle records history and budget evaluate selects a measured pha
   );
 });
 
+test("phase prepare CLI atomically selects and starts a phase with one snapshot", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "task-guard-phase-prepare-cli-"));
+  const project = path.join(root, "project");
+  const home = path.join(root, "global");
+  const input = path.join(root, "phase-prepare.json");
+  execFileSync("git", ["init", "-q", project]);
+  await mkdir(home);
+  await writeFile(path.join(home, "usage-history.jsonl"), `${JSON.stringify({
+    model: "gpt-5.6-sol",
+    reasoning_effort: "high",
+    phase_type: "implementation",
+    plan: "plus",
+    quota_delta: 7,
+    measurement_confidence: "HIGH_CONFIDENCE",
+    reset_occurred: false,
+  })}\n`);
+  await writeFile(input, JSON.stringify({
+    safety_reserve_percent: 5,
+    phases: [{
+      task_id: "phase-prepare-cli-task",
+      phase_id: "implementation",
+      phase_type: "implementation",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+      plan: "plus",
+      dependencies_met: true,
+    }],
+  }));
+
+  const prepared = run([
+    "phase", "prepare", "--project", project, "--input", input,
+  ], {
+    env: { TASK_GUARD_HOME: home, TASK_GUARD_TEST_QUOTA: "healthy" },
+  });
+
+  assert.equal(prepared.status, 0, prepared.stderr);
+  const output = JSON.parse(prepared.stdout);
+  assert.equal(output.decision.selected_phase_id, "implementation");
+  assert.equal(output.snapshot.snapshot_id, output.decision.quota_snapshot_id);
+  assert.equal(output.snapshot.snapshot_id, output.phase_start.quota_before_snapshot_id);
+});
+
 test("pause prepare persists one refreshed snapshot for resume scheduling", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "task-guard-pause-cli-"));
   const project = path.join(root, "project");
@@ -189,5 +265,52 @@ test("pause prepare persists one refreshed snapshot for resume scheduling", asyn
   assert.equal(output.snapshot.freshness, "AUTHORITATIVE");
   assert.equal(output.snapshot.snapshot_id, output.automation_schedule.quota_snapshot_id);
   assert.equal(output.snapshot.five_hour.reset_at, output.automation_schedule.resume_after);
+  assert.equal(output.notification.sent, false);
+});
+
+test("resume prepare CLI reuses one snapshot after confirmed heartbeat cleanup", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "task-guard-resume-cli-"));
+  const project = path.join(root, "project");
+  const home = path.join(root, "global");
+  const checkpointInput = path.join(root, "checkpoint.json");
+  const resumeInput = path.join(root, "resume.json");
+  execFileSync("git", ["init", "-q", project]);
+  await writeFile(checkpointInput, JSON.stringify({
+    task_id: "resume-cli-task",
+    task_description: "Resume through one lifecycle command",
+    status: "PAUSED_FOR_QUOTA",
+    heartbeat_automation_id: "automation-123",
+    exact_next_actions: ["Continue CLI integration tests"],
+  }));
+  await writeFile(resumeInput, JSON.stringify({
+    heartbeat_cleanup_confirmed: true,
+    notification: {
+      project: "demo",
+      task: "Resume through one lifecycle command",
+      checkpoint: "Verified",
+      repository: "No external changes",
+      status: "Working",
+    },
+  }));
+  const commonEnv = {
+    TASK_GUARD_HOME: home,
+    TASK_GUARD_TEST_QUOTA: "healthy",
+    TASK_GUARD_NOTIFICATION_ENABLED: "false",
+  };
+  const saved = run([
+    "checkpoint", "save", "--project", project, "--input", checkpointInput,
+  ], { env: commonEnv });
+  assert.equal(saved.status, 0, saved.stderr);
+
+  const prepared = run([
+    "resume", "prepare", "--project", project,
+    "--task-id", "resume-cli-task", "--input", resumeInput,
+  ], { env: commonEnv });
+
+  assert.equal(prepared.status, 0, prepared.stderr);
+  const output = JSON.parse(prepared.stdout);
+  assert.equal(output.status, "TASK_RESUMED");
+  assert.equal(output.snapshot.snapshot_id, output.resume.quota_snapshot_id);
+  assert.equal(output.heartbeat_cleanup.completed, true);
   assert.equal(output.notification.sent, false);
 });

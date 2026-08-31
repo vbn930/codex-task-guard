@@ -31,11 +31,11 @@ When beginning a new substantial task, send `TASK_STARTED` once before implement
 
 Interpret only windows whose `window_duration_minutes` is exactly `300` or `10080`. An unavailable window stays unavailable. Never relabel the weekly window as five-hour quota, infer reset times, or invent missing percentages.
 
-Use `budget evaluate` with the current dependency-ready phases, an explicit safety reserve, and measured history. Run only the selected phase. If no measured cohort exists, the result is `INSUFFICIENT_HISTORY`; do not invent a model multiplier or claim the phase is safe. Split the phase further, run only a deliberately bounded calibration phase when justified, or pause.
+Use `phase prepare --project <project> --input <phase-plan.json>` with the current dependency-ready phases, an explicit safety reserve, and measured history. It refreshes once, evaluates the budget, and records the selected phase start from that same snapshot. Run only `decision.selected_phase_id`. If no phase fits, it returns `phase_start: null` and creates no active phase. `budget evaluate` and `phase start` remain available for diagnostic/manual use, but do not compose them as the default automated workflow because separate commands do not form one lifecycle boundary. If no measured cohort exists, the result is `INSUFFICIENT_HISTORY`; do not invent a model multiplier or claim the phase is safe. Split the phase further, run only a deliberately bounded calibration phase when justified, or pause.
 
 ## Measure each phase
 
-Before changing files for a selected phase, run `phase start --project <project> --input <phase.json>`. Supply the actual active `model`, `reasoning_effort`, `phase_type`, and optional plan partition. If the active runtime values cannot be verified, use `unknown`; never substitute config defaults while claiming they are active session values.
+Each candidate passed to `phase prepare` must include the start metadata: `task_id`, `phase_id`, `model`, `reasoning_effort`, `phase_type`, and optional plan partition. Supply the actual active runtime values. If they cannot be verified, use `unknown`; never substitute config defaults while claiming they are active session values.
 
 Finish the phase at a coherent boundary. When more work remains, prefer `phase finish --project <project> --phase-id <id> --input <decision.json>` so one authoritative after snapshot is shared by history, predictor, next-phase decision, and any quota-bearing notification. Use plain `phase complete` only when no immediate budget decision is needed. Use `concurrent_usage: false` only when no other shared-pool work ran.
 
@@ -45,18 +45,28 @@ The estimator matches exact plan/model/reasoning/phase-type cohorts and uses the
 
 When no dependency-ready phase with measured cost fits the available budget, and further safe decomposition is not useful:
 
-1. Read [references/checkpoint-input.md](references/checkpoint-input.md) and run `pause prepare`. It refreshes once, saves the checkpoint first, then uses the same snapshot for registry, Discord, and returned `automation_schedule`. Do not separately reuse an earlier quota/reset.
-2. Notification failure is non-fatal, but an unavailable authoritative five-hour reset means automatic scheduling must not proceed.
-3. If the Codex app current-thread heartbeat automation tool is available and a local run can keep the host powered on, the desktop app running, and the project available on disk, schedule this same thread with its first wake at or just after the verified five-hour reset. Its prompt must recheck quota, verify the checkpoint, clean up this heartbeat, resume the checkpoint, continue the exact next action, and avoid creating a new task. Capture the returned automation ID as `heartbeat_automation_id`, add it to the same state JSON, and run `checkpoint save` again. If the ID cannot be persisted, delete or disable the automation and use the fallback below. Do not invent an automation interface or schedule.
+1. Read [references/checkpoint-input.md](references/checkpoint-input.md) and run `pause prepare`. It attempts one refresh and always attempts the checkpoint save. An authoritative verified five-hour reset is required only for `automation_schedule`, never for preserving task state.
+2. The same pause snapshot drives checkpoint, registry, and Discord. If it is `UNAVAILABLE`, any last-known snapshot remains stale context, `resume_after` is null, Discord reports quota unavailable, and `resume_mode` is `MANUAL`. Notification failure is non-fatal.
+3. Only when `resume_mode` is `AUTOMATION_ELIGIBLE`, and the Codex app current-thread heartbeat automation tool is available with a viable local host, schedule this same thread at or just after `automation_schedule.resume_after`. Its prompt must use `resume prepare`, continue the exact next action, and avoid creating a new task. Persist the returned ID with `checkpoint heartbeat set --project <project> --task-id <task-id> --automation-id <id>`; never rebuild and re-save the checkpoint state. If the ID cannot be patched, delete or disable the automation and use the fallback below. Do not invent an automation interface or schedule.
 4. If automation is unavailable, leave `resume_after` and the checkpoint path in the registry, tell the user how to resume this same thread, and stop the current execution.
 
 The paused state is `PAUSED_FOR_QUOTA`, not completed or failed.
 
 ## Resume
 
-Run `checkpoint verify` before doing more work. If it reports `REPOSITORY_STATE_CHANGED`, inspect `git status`, `git diff`, and the checkpoint; reconcile deliberately or send `TASK_BLOCKED`. Never overwrite external changes or trust the checkpoint over the filesystem.
+After wake, delete or disable the stored heartbeat through the Codex app and run `resume prepare --project <project> --task-id <task-id> --input <resume.json>` with `heartbeat_cleanup_confirmed: true` only after that external cleanup succeeds. The resume lifecycle refreshes once, verifies checkpoint ownership and repository state, clears the stored heartbeat through the narrow patch, marks the checkpoint working, sends `TASK_RESUMED`, and optionally evaluates the next phases from the same snapshot. It derives `resume_point` from the checkpoint's first `exact_next_actions` entry; do not supply a stale copy.
 
-Immediately after wake, refresh quota, then verify the checkpoint and repository. If verification succeeds, delete the stored heartbeat, run `checkpoint resume`, and send `TASK_RESUMED`; the notify command refreshes JIT and derives quota/reset rather than reusing the wake value. Use the actual first `exact_next_actions` entry as `resume_point`.
+If repository verification fails, inspect `git status`, `git diff`, and the checkpoint. The lifecycle does not run `checkpoint resume` or send `TASK_RESUMED`; it preserves the incomplete checkpoint and returns `TASK_BLOCKED`. Never overwrite external changes or trust the checkpoint over the filesystem. `checkpoint verify`, `checkpoint resume`, and standalone `notify TASK_RESUMED` remain manual/diagnostic commands, not the default automated resume flow.
+
+## Snapshot ownership boundaries
+
+- Task start: the standalone `notify TASK_STARTED` wrapper refreshes JIT and passes that snapshot to Discord.
+- Phase prepare: refresh once, then budget decision and phase start use the same snapshot.
+- Phase finish: refresh once, then measurement, history, next decision, and optional Discord use the same snapshot.
+- Quota pause: attempt refresh once, always attempt checkpoint save, then use that same result for Discord and, only with a verified reset, scheduling.
+- Resume: refresh once, then verification, resume, TASK_RESUMED, and optional next decision use the same snapshot.
+
+Lifecycle functions own quota refresh. Discord formatting and transport never refresh quota. Within one boundary, consumers must accept the owned snapshot rather than reading quota again.
 
 ## Complete or block
 

@@ -358,6 +358,61 @@ export async function resolveCheckpointPath(projectPath) {
   return path.join(path.resolve(rootBuffer.toString("utf8").trim()), CHECKPOINT_RELATIVE_PATH);
 }
 
+async function patchCheckpointHeartbeat({
+  projectPath,
+  taskId,
+  automationId,
+  taskGuardHome = defaultTaskGuardHome(),
+}) {
+  const rootBuffer = await git(path.resolve(projectPath), ["rev-parse", "--show-toplevel"]);
+  const root = path.resolve(rootBuffer.toString("utf8").trim());
+  const checkpointPath = path.join(root, CHECKPOINT_RELATIVE_PATH);
+  const now = new Date().toISOString();
+  let heartbeatAutomationId = null;
+
+  await withRegistryLock(taskGuardHome, async () => {
+    const state = await readCheckpoint(checkpointPath);
+    if (state.task_id !== taskId) {
+      throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
+    }
+    const registry = await listRegistry({ taskGuardHome });
+    const key = registryKey(root, taskId);
+    if (!registry.tasks[key]) throw new Error("Task registry entry is missing");
+
+    const patchedState = { ...state };
+    if (automationId === null) delete patchedState.heartbeat_automation_id;
+    else patchedState.heartbeat_automation_id = automationId;
+    await atomicWrite(checkpointPath, renderCheckpoint(patchedState));
+
+    const patchedRegistryEntry = {
+      ...registry.tasks[key],
+      updated_at: now,
+    };
+    if (automationId === null) delete patchedRegistryEntry.heartbeat_automation_id;
+    else patchedRegistryEntry.heartbeat_automation_id = automationId;
+    registry.tasks[key] = patchedRegistryEntry;
+    await writeRegistry(taskGuardHome, registry);
+    heartbeatAutomationId = patchedState.heartbeat_automation_id ?? null;
+  });
+
+  return {
+    checkpoint_path: checkpointPath,
+    registry_updated: true,
+    heartbeat_automation_id: heartbeatAutomationId,
+  };
+}
+
+export async function setCheckpointHeartbeat(options) {
+  if (typeof options?.automationId !== "string" || options.automationId.trim() === "") {
+    throw new Error("automationId is required");
+  }
+  return patchCheckpointHeartbeat(options);
+}
+
+export async function clearCheckpointHeartbeat(options) {
+  return patchCheckpointHeartbeat({ ...options, automationId: null });
+}
+
 export async function verifyCheckpoint(checkpointPath) {
   const state = await readCheckpoint(checkpointPath);
   const current = await repositorySnapshot(state.repository.project_path);

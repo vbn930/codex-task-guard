@@ -37,17 +37,52 @@ Save it with:
 node <skill-root>/scripts/task-guard.mjs checkpoint save --project <project> --input <file>
 ```
 
-For a quota pause, wrap this object as `"checkpoint"` and the non-secret Discord fields as `"notification"`, then use `pause prepare` instead. It refreshes authoritative quota once, writes `quota_snapshot`, derives `resume_after` from its verified five-hour reset, saves checkpoint schema v2, sends Discord from the same snapshot, and returns `automation_schedule` with the identical reset, snapshot ID, and observation time. Do not copy a reset from another read.
+For a quota pause, wrap this object as `"checkpoint"` and the non-secret Discord fields as `"notification"`, then use `pause prepare` instead. It attempts one refresh and always attempts to save checkpoint schema v2. A refresh failure is stored as `quota_snapshot.freshness: "UNAVAILABLE"`; a cached snapshot may appear only as stale last-known context. In that case `resume_after` and `automation_schedule` are null, `resume_mode` is `MANUAL`, and Discord does not display cached quota or reset metadata as current.
+
+When the snapshot is authoritative and has a verified 300-minute reset, `resume_mode` is `AUTOMATION_ELIGIBLE`; checkpoint, registry, Discord, and `automation_schedule` share that snapshot ID, observation time, and reset. Scheduling failures are distinguished as `AUTHORITATIVE_QUOTA_REQUIRED`, `FIVE_HOUR_QUOTA_UNAVAILABLE`, or `VERIFIED_FIVE_HOUR_RESET_REQUIRED` in `automation_schedule_error`, but none of those errors prevents checkpoint preservation.
 
 The utility writes `<project>/.codex/task-guard-checkpoint.md`, adds it to the repository-local Git exclude file, and stores minimal lookup metadata under the Codex home directory.
 
-Only one `WORKING` or `PAUSED_FOR_QUOTA` task may own a repository checkpoint. Saving a different `task_id` while one is active fails with `ACTIVE_CHECKPOINT_EXISTS` and leaves the first checkpoint untouched. Re-saving the same `task_id`, including after adding `heartbeat_automation_id`, remains supported.
+Only one `WORKING` or `PAUSED_FOR_QUOTA` task may own a repository checkpoint. Saving a different `task_id` while one is active fails with `ACTIVE_CHECKPOINT_EXISTS` and leaves the first checkpoint untouched.
 
-Omit `heartbeat_automation_id` when no wake-up automation was created. When an automation is created after the initial save, add its returned ID to the same state JSON and save again. On a verified resume, mark the task as working with:
+Omit `heartbeat_automation_id` when no wake-up automation was created. After creating one, patch only its ID:
 
 ```text
-node <skill-root>/scripts/task-guard.mjs checkpoint resume --project <project> --task-id <task-id>
+node <skill-root>/scripts/task-guard.mjs checkpoint heartbeat set --project <project> --task-id <task-id> --automation-id <id>
+node <skill-root>/scripts/task-guard.mjs checkpoint heartbeat clear --project <project> --task-id <task-id>
 ```
+
+These commands read the owned checkpoint, preserve its quota snapshot, reset, exact next actions, thread reference, repository fingerprint, and pause metadata, then update only heartbeat metadata in the checkpoint and registry. They do not require a schema bump; checkpoints without heartbeat or quota fields remain valid.
+
+## Resume lifecycle input
+
+After the Codex app has deleted or disabled the stored heartbeat, run the atomic resume boundary:
+
+```json
+{
+  "heartbeat_cleanup_confirmed": true,
+  "notification": {
+    "project": "project-name",
+    "task": "Task 24",
+    "checkpoint": "Verified",
+    "repository": "No external changes",
+    "status": "Working"
+  },
+  "blocked_notification": {
+    "project": "project-name",
+    "task": "Task 24",
+    "action_required": "Review repository changes",
+    "checkpoint": "Preserved",
+    "status": "Blocked"
+  }
+}
+```
+
+```text
+node <skill-root>/scripts/task-guard.mjs resume prepare --project <project> --task-id <task-id> --input <resume.json>
+```
+
+The command refreshes once, verifies checkpoint ownership and repository state, clears confirmed heartbeat metadata, marks the checkpoint working, and sends `TASK_RESUMED` from that same snapshot. It derives `resume_point` from the checkpoint. Optional `phases` and `safety_reserve_percent` use the same snapshot for an immediate next budget decision. If repository or heartbeat cleanup verification fails, it leaves the checkpoint incomplete, does not transition to `WORKING`, and returns `TASK_BLOCKED`.
 
 ## Discord event payload
 

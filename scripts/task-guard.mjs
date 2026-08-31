@@ -2,16 +2,23 @@
 
 import {
   auditRegistry,
+  clearCheckpointHeartbeat,
   completeTask,
   readCheckpoint,
   resolveCheckpointPath,
   resumeTask,
   saveCheckpoint,
+  setCheckpointHeartbeat,
   verifyCheckpoint,
 } from "./lib/checkpoint.mjs";
 import { notificationsEnabled, notifyDiscord } from "./lib/discord.mjs";
 import { runDoctor } from "./lib/doctor.mjs";
-import { completePhaseAndDecide, prepareQuotaPause } from "./lib/lifecycle.mjs";
+import {
+  completePhaseAndDecide,
+  preparePhase,
+  prepareQuotaPause,
+  prepareTaskResume,
+} from "./lib/lifecycle.mjs";
 import { quotaFromTestFixture } from "./lib/quota.mjs";
 import { createQuotaSnapshotStore } from "./lib/quota-snapshot.mjs";
 import {
@@ -73,6 +80,25 @@ async function checkpointPathFromArgs(args) {
 
 async function checkpointCommand(args) {
   const [action, ...options] = args;
+  if (action === "heartbeat") {
+    const [heartbeatAction, ...heartbeatOptions] = options;
+    const common = {
+      projectPath: optionValue(heartbeatOptions, "--project") ?? process.cwd(),
+      taskId: optionValue(heartbeatOptions, "--task-id", { required: true }),
+    };
+    if (heartbeatAction === "set") {
+      printJson(await setCheckpointHeartbeat({
+        ...common,
+        automationId: optionValue(heartbeatOptions, "--automation-id", { required: true }),
+      }));
+      return 0;
+    }
+    if (heartbeatAction === "clear") {
+      printJson(await clearCheckpointHeartbeat(common));
+      return 0;
+    }
+    throw new Error("checkpoint heartbeat action must be set or clear");
+  }
   if (action === "save") {
     const projectPath = optionValue(options, "--project") ?? process.cwd();
     const state = await readJsonInput(optionValue(options, "--input", { required: true }));
@@ -104,7 +130,7 @@ async function checkpointCommand(args) {
     printJson(await completeTask({ projectPath, taskId }));
     return 0;
   }
-  throw new Error("checkpoint action must be save, show, verify, list, resume, or complete");
+  throw new Error("checkpoint action must be heartbeat, save, show, verify, list, resume, or complete");
 }
 
 async function notifyCommand(args) {
@@ -145,6 +171,16 @@ function parseConcurrentUsage(value) {
 async function phaseCommand(args) {
   const [action, ...options] = args;
   const projectPath = optionValue(options, "--project") ?? process.cwd();
+  if (action === "prepare") {
+    const input = await readJsonInput(optionValue(options, "--input", { required: true }));
+    printJson(await preparePhase({
+      projectPath,
+      phases: input.phases,
+      safetyReservePercent: input.safety_reserve_percent,
+      snapshotStore: currentQuotaStore(),
+    }));
+    return 0;
+  }
   if (action === "start") {
     const metadata = await readJsonInput(optionValue(options, "--input", { required: true }));
     printJson(await startPhase({
@@ -181,7 +217,7 @@ async function phaseCommand(args) {
     }));
     return 0;
   }
-  throw new Error("phase action must be start, complete, or finish");
+  throw new Error("phase action must be prepare, start, complete, or finish");
 }
 
 async function historyCommand(args) {
@@ -222,8 +258,30 @@ async function pauseCommand(args) {
   return 0;
 }
 
+async function resumeCommand(args) {
+  const [action, ...options] = args;
+  if (action !== "prepare") throw new Error("resume action must be prepare");
+  const projectPath = optionValue(options, "--project") ?? process.cwd();
+  const taskId = optionValue(options, "--task-id", { required: true });
+  const input = await readJsonInput(optionValue(options, "--input", { required: true }));
+  const result = await prepareTaskResume({
+    projectPath,
+    taskId,
+    snapshotStore: currentQuotaStore(),
+    ...(input.heartbeat_cleanup_confirmed === true
+      ? { cleanupHeartbeat: async () => true }
+      : {}),
+    notificationPayload: input.notification,
+    blockedNotificationPayload: input.blocked_notification,
+    phases: input.phases,
+    safetyReservePercent: input.safety_reserve_percent,
+  });
+  printJson(result);
+  return result.status === "TASK_RESUMED" ? 0 : 5;
+}
+
 function printHelp() {
-  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  doctor [--project PATH]\n  phase start --project PATH --input FILE| -\n  phase complete --project PATH --phase-id ID [--concurrent-usage true|false|unknown]\n  phase finish --project PATH --phase-id ID --input FILE| -\n  history list [--limit N]\n  budget evaluate --input FILE| -\n  pause prepare --project PATH --input FILE| -\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint resume --project PATH --task-id ID\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
+  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  doctor [--project PATH]\n  phase prepare --project PATH --input FILE| -\n  phase start --project PATH --input FILE| -\n  phase complete --project PATH --phase-id ID [--concurrent-usage true|false|unknown]\n  phase finish --project PATH --phase-id ID --input FILE| -\n  history list [--limit N]\n  budget evaluate --input FILE| -\n  pause prepare --project PATH --input FILE| -\n  resume prepare --project PATH --task-id ID --input FILE| -\n  checkpoint heartbeat set --project PATH --task-id ID --automation-id ID\n  checkpoint heartbeat clear --project PATH --task-id ID\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint resume --project PATH --task-id ID\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -234,6 +292,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === "history") return historyCommand(argv.slice(1));
   if (command === "budget") return budgetCommand(argv.slice(1));
   if (command === "pause") return pauseCommand(argv.slice(1));
+  if (command === "resume") return resumeCommand(argv.slice(1));
   if (command === "checkpoint") return checkpointCommand(argv.slice(1));
   if (command === "notify") return notifyCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") {

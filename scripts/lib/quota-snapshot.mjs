@@ -15,6 +15,26 @@ function unavailableWindow() {
   return { available: false };
 }
 
+export function unavailableQuotaSnapshot({
+  source = "codex_app_server",
+  observedAt = new Date(),
+  lastKnownSnapshot,
+} = {}) {
+  const date = observedAt instanceof Date ? observedAt : new Date(observedAt);
+  return {
+    source,
+    observed_at: Number.isNaN(date.valueOf()) ? new Date().toISOString() : date.toISOString(),
+    freshness: "UNAVAILABLE",
+    availability: "UNAVAILABLE",
+    five_hour: unavailableWindow(),
+    weekly: unavailableWindow(),
+    error: { code: "RATE_LIMIT_REFRESH_FAILED" },
+    ...(lastKnownSnapshot ? {
+      last_known_snapshot: { ...lastKnownSnapshot, freshness: "STALE" },
+    } : {}),
+  };
+}
+
 function normalizeStoredWindow(window) {
   if (!window?.available) return unavailableWindow();
   return {
@@ -86,19 +106,12 @@ export class QuotaSnapshotStore {
       await this.record(snapshot);
       return snapshot;
     } catch {
-      const observedAt = this.now();
-      const date = observedAt instanceof Date ? observedAt : new Date(observedAt);
-      const lastKnown = await this.latest();
-      return {
+      const lastKnown = await this.latest().catch(() => null);
+      return unavailableQuotaSnapshot({
         source: this.source,
-        observed_at: Number.isNaN(date.valueOf()) ? new Date().toISOString() : date.toISOString(),
-        freshness: "UNAVAILABLE",
-        availability: "UNAVAILABLE",
-        five_hour: unavailableWindow(),
-        weekly: unavailableWindow(),
-        error: { code: "RATE_LIMIT_REFRESH_FAILED" },
-        ...(lastKnown ? { last_known_snapshot: lastKnown } : {}),
-      };
+        observedAt: this.now(),
+        lastKnownSnapshot: lastKnown,
+      });
     }
   }
 
@@ -132,4 +145,17 @@ export function validateFreshness(snapshot, { requireFiveHour = true } = {}) {
     throw new Error("FIVE_HOUR_QUOTA_UNAVAILABLE");
   }
   return snapshot;
+}
+
+export function validateVerifiedFiveHourReset(snapshot) {
+  const authoritative = validateFreshness(snapshot);
+  const resetAt = authoritative.five_hour.reset_at;
+  if (
+    authoritative.five_hour.window_duration_minutes !== 300
+    || typeof resetAt !== "string"
+    || Number.isNaN(Date.parse(resetAt))
+  ) {
+    throw new Error("VERIFIED_FIVE_HOUR_RESET_REQUIRED");
+  }
+  return authoritative;
 }
