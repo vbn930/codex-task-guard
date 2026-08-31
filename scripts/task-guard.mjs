@@ -4,6 +4,7 @@ import {
   auditRegistry,
   clearCheckpointHeartbeat,
   completeTask,
+  patchCheckpointResumeAutomation,
   readCheckpoint,
   resolveCheckpointPath,
   resumeTask,
@@ -15,6 +16,7 @@ import { notificationsEnabled, notifyDiscord } from "./lib/discord.mjs";
 import { runDoctor } from "./lib/doctor.mjs";
 import {
   completePhaseAndDecide,
+  finalizeQuotaPause,
   preparePhase,
   prepareQuotaPause,
   prepareTaskResume,
@@ -80,6 +82,21 @@ async function checkpointPathFromArgs(args) {
 
 async function checkpointCommand(args) {
   const [action, ...options] = args;
+  if (action === "automation") {
+    const [automationAction, ...automationOptions] = options;
+    if (automationAction !== "set") throw new Error("checkpoint automation action must be set");
+    const resumeAutomation = await readJsonInput(optionValue(
+      automationOptions,
+      "--input",
+      { required: true },
+    ));
+    printJson(await patchCheckpointResumeAutomation({
+      projectPath: optionValue(automationOptions, "--project") ?? process.cwd(),
+      taskId: optionValue(automationOptions, "--task-id", { required: true }),
+      resumeAutomation,
+    }));
+    return 0;
+  }
   if (action === "heartbeat") {
     const [heartbeatAction, ...heartbeatOptions] = options;
     const common = {
@@ -246,9 +263,18 @@ async function budgetCommand(args) {
 
 async function pauseCommand(args) {
   const [action, ...options] = args;
-  if (action !== "prepare") throw new Error("pause action must be prepare");
   const projectPath = optionValue(options, "--project") ?? process.cwd();
   const input = await readJsonInput(optionValue(options, "--input", { required: true }));
+  if (action === "finalize") {
+    printJson(await finalizeQuotaPause({
+      projectPath,
+      taskId: optionValue(options, "--task-id", { required: true }),
+      resumeAutomation: input.resume_automation,
+      notificationPayload: input.notification,
+    }));
+    return 0;
+  }
+  if (action !== "prepare") throw new Error("pause action must be prepare or finalize");
   printJson(await prepareQuotaPause({
     projectPath,
     checkpointState: input.checkpoint,
@@ -281,7 +307,7 @@ async function resumeCommand(args) {
 }
 
 function printHelp() {
-  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  doctor [--project PATH]\n  phase prepare --project PATH --input FILE| -\n  phase start --project PATH --input FILE| -\n  phase complete --project PATH --phase-id ID [--concurrent-usage true|false|unknown]\n  phase finish --project PATH --phase-id ID --input FILE| -\n  history list [--limit N]\n  budget evaluate --input FILE| -\n  pause prepare --project PATH --input FILE| -\n  resume prepare --project PATH --task-id ID --input FILE| -\n  checkpoint heartbeat set --project PATH --task-id ID --automation-id ID\n  checkpoint heartbeat clear --project PATH --task-id ID\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint resume --project PATH --task-id ID\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
+  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  doctor [--project PATH]\n  phase prepare --project PATH --input FILE| -\n  phase start --project PATH --input FILE| -\n  phase complete --project PATH --phase-id ID [--concurrent-usage true|false|unknown]\n  phase finish --project PATH --phase-id ID --input FILE| -\n  history list [--limit N]\n  budget evaluate --input FILE| -\n  pause prepare --project PATH --input FILE| -\n  pause finalize --project PATH --task-id ID --input FILE| -\n  resume prepare --project PATH --task-id ID --input FILE| -\n  checkpoint automation set --project PATH --task-id ID --input FILE| -\n  checkpoint heartbeat set --project PATH --task-id ID --automation-id ID\n  checkpoint heartbeat clear --project PATH --task-id ID\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint resume --project PATH --task-id ID\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
 }
 
 export async function main(argv = process.argv.slice(2)) {

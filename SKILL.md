@@ -47,8 +47,26 @@ When no dependency-ready phase with measured cost fits the available budget, and
 
 1. Read [references/checkpoint-input.md](references/checkpoint-input.md) and run `pause prepare`. It attempts one refresh and always attempts the checkpoint save. An authoritative verified five-hour reset is required only for `automation_schedule`, never for preserving task state.
 2. The same pause snapshot drives checkpoint, registry, and Discord. If it is `UNAVAILABLE`, any last-known snapshot remains stale context, `resume_after` is null, Discord reports quota unavailable, and `resume_mode` is `MANUAL`. Notification failure is non-fatal.
-3. Only when `resume_mode` is `AUTOMATION_ELIGIBLE`, and the Codex app current-thread heartbeat automation tool is available with a viable local host, schedule this same thread at or just after `automation_schedule.resume_after`. Its prompt must use `resume prepare`, continue the exact next action, and avoid creating a new task. Persist the returned ID with `checkpoint heartbeat set --project <project> --task-id <task-id> --automation-id <id>`; never rebuild and re-save the checkpoint state. If the ID cannot be patched, delete or disable the automation and use the fallback below. Do not invent an automation interface or schedule.
-4. If automation is unavailable, leave `resume_after` and the checkpoint path in the registry, tell the user how to resume this same thread, and stop the current execution.
+3. Only when `resume_mode` is `AUTOMATION_ELIGIBLE`, the local host is viable, and the Codex app exposes heartbeat `create` plus ID-based `view`, create `kind: "heartbeat"` with `destination: "thread"` and the current/target thread. Never use detached `cron` as the same-thread fallback.
+4. Record `CREATE_REQUESTED`; a create request, an automation card, and an ID are not verification. In particular:
+
+   ```text
+   Rendered automation card != scheduled automation
+   Create request != persisted automation
+   Automation ID != verified automation
+   VERIFIED requires read-back
+   ```
+
+5. If create returns a real automation ID, call `mcp__codex_app__automation_update({ id, mode: "view" })`. Retry that read only two or three times with short bounded delays so asynchronous persistence can settle; do not recreate after the first read miss.
+6. Normalize the view and require persisted ID, logical name, `kind: heartbeat`, active status, matching reset/wake semantics, and matching target/current-thread binding. Compare the prompt when the view exposes it. If target binding is unreadable, keep the result below `VERIFIED`.
+7. A UI-only, blank, timeout, or otherwise ID-less result enters `RECONCILING`; it is never immediate success and never an immediate create retry.
+8. Because the tool exposes no list/search API, Windows may inspect `%USERPROFILE%\.codex\automations` read-only only for an ambiguous ID-less create. Match recent candidates using name, prompt, kind, thread, schedule, and request time. Never edit TOML.
+9. Zero high-confidence filesystem candidates means `ABSENT`. Exactly one yields an ID that still must pass tool `view`. Multiple candidates are `AMBIGUOUS`; select none and use manual fallback. Filesystem evidence alone can never produce `VERIFIED`.
+10. Retry create at most once, for a maximum of two create attempts, and only after bounded view checks plus reconciliation establish absence. Tool/schema/permission/non-local structural failures, mismatched persisted fields, and ambiguous candidates go directly to manual fallback.
+11. Run `pause finalize --project <project> --task-id <task-id> --input <result.json>`. It narrow-patches sanitized `resume_automation` state without replacing quota snapshot, reset, exact next actions, task ID, or thread reference, then sends the final Discord pause status.
+12. Only a fully verified result uses `resume_mode: AUTOMATION` and “Same-thread automation verified”. Every other terminal result uses `resume_mode: MANUAL`; UI rendering alone is reported as not persisted/verified.
+13. If update/delete payloads are not explicitly known in the current runtime, do not guess cleanup calls. Preserve the automation ID and `cleanup_required` state for later manual/agent cleanup.
+14. Stop execution after the final checkpoint patch and notification.
 
 The paused state is `PAUSED_FOR_QUOTA`, not completed or failed.
 

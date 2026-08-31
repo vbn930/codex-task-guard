@@ -95,6 +95,107 @@ test("checkpoint heartbeat CLI patches and clears only the automation id", async
   assert.equal(JSON.parse(cleared.stdout).heartbeat_automation_id, null);
 });
 
+test("checkpoint automation CLI stores a verified sanitized result", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "task-guard-automation-cli-"));
+  const project = path.join(root, "project");
+  const home = path.join(root, "global");
+  const checkpointInput = path.join(root, "checkpoint-input.json");
+  const automationInput = path.join(root, "automation-input.json");
+  execFileSync("git", ["init", "-q", project]);
+  await writeFile(checkpointInput, JSON.stringify({
+    task_id: "automation-cli-task",
+    task_description: "Patch verified automation through the CLI",
+    status: "PAUSED_FOR_QUOTA",
+    quota_snapshot: { snapshot_id: "snapshot-cli" },
+    resume_after: "2026-08-31T17:32:11.000Z",
+    exact_next_actions: ["Continue exactly here"],
+    thread_reference: "thread-cli",
+  }));
+  await writeFile(automationInput, JSON.stringify({
+    purpose: "quota_resume",
+    status: "VERIFIED",
+    automation_id: "automation-cli",
+    attempts: 1,
+    target_thread: "thread-cli",
+    resume_after: "2026-08-31T17:32:11.000Z",
+    snapshot_id: "snapshot-cli",
+    automation_fingerprint: "fingerprint-cli",
+    verification: {
+      persisted: true,
+      identity_match: true,
+      kind_match: true,
+      thread_match: true,
+      schedule_match: true,
+      status_active: true,
+    },
+  }));
+  const env = { TASK_GUARD_HOME: home };
+  assert.equal(run([
+    "checkpoint", "save", "--project", project, "--input", checkpointInput,
+  ], { env }).status, 0);
+
+  const patched = run([
+    "checkpoint", "automation", "set", "--project", project,
+    "--task-id", "automation-cli-task", "--input", automationInput,
+  ], { env });
+
+  assert.equal(patched.status, 0, patched.stderr);
+  assert.equal(JSON.parse(patched.stdout).resume_mode, "AUTOMATION");
+});
+
+test("pause finalize CLI patches the result before its final notification", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "task-guard-finalize-cli-"));
+  const project = path.join(root, "project");
+  const home = path.join(root, "global");
+  const checkpointInput = path.join(root, "checkpoint.json");
+  const finalInput = path.join(root, "final.json");
+  execFileSync("git", ["init", "-q", project]);
+  const snapshotId = "snapshot-final";
+  const resumeAfter = "2026-08-31T17:32:11.000Z";
+  await writeFile(checkpointInput, JSON.stringify({
+    task_id: "finalize-cli-task",
+    task_description: "Finalize automation result",
+    status: "PAUSED_FOR_QUOTA",
+    quota_snapshot: {
+      snapshot_id: snapshotId,
+      observed_at: "2026-08-31T12:24:00.000Z",
+      freshness: "AUTHORITATIVE",
+      five_hour: { available: true, remaining_percent: 5, reset_at: resumeAfter },
+    },
+    resume_after: resumeAfter,
+    exact_next_actions: ["Continue"],
+    thread_reference: "thread-final",
+  }));
+  await writeFile(finalInput, JSON.stringify({
+    resume_automation: {
+      purpose: "quota_resume",
+      status: "FAILED",
+      automation_id: null,
+      attempts: 2,
+      target_thread: "thread-final",
+      resume_after: resumeAfter,
+      snapshot_id: snapshotId,
+      last_error: "PERSISTENCE_NOT_VERIFIED",
+      resolution: "MANUAL_FALLBACK",
+    },
+    notification: { project: "demo", task: "Finalize automation result" },
+  }));
+  const env = { TASK_GUARD_HOME: home, CODEX_DISCORD_WEBHOOK_URL: "" };
+  assert.equal(run([
+    "checkpoint", "save", "--project", project, "--input", checkpointInput,
+  ], { env }).status, 0);
+
+  const finalized = run([
+    "pause", "finalize", "--project", project, "--task-id", "finalize-cli-task",
+    "--input", finalInput,
+  ], { env });
+
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const output = JSON.parse(finalized.stdout);
+  assert.equal(output.resume_mode, "MANUAL");
+  assert.equal(output.notification.reason, "DISABLED");
+});
+
 test("notify command succeeds as a disabled optional feature", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "task-guard-notify-cli-"));
   const input = path.join(root, "event.json");
@@ -245,7 +346,6 @@ test("pause prepare persists one refreshed snapshot for resume scheduling", asyn
       task: "Pause with one quota snapshot",
       reason: "Quota low",
       checkpoint: "Saved",
-      resume: "Same-thread automation scheduled",
       status: "Waiting for quota reset",
     },
   }));
@@ -265,7 +365,9 @@ test("pause prepare persists one refreshed snapshot for resume scheduling", asyn
   assert.equal(output.snapshot.freshness, "AUTHORITATIVE");
   assert.equal(output.snapshot.snapshot_id, output.automation_schedule.quota_snapshot_id);
   assert.equal(output.snapshot.five_hour.reset_at, output.automation_schedule.resume_after);
-  assert.equal(output.notification.sent, false);
+  assert.equal(output.notification, null);
+  assert.equal(output.automation_intent.kind, "heartbeat");
+  assert.equal(output.automation_intent.destination, "thread");
 });
 
 test("resume prepare CLI reuses one snapshot after confirmed heartbeat cleanup", async () => {

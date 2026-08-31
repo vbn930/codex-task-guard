@@ -148,7 +148,9 @@ test("sends a quota pause embed with local and relative reset time without expos
       five_hour_remaining: "6%",
       reset: "2026-08-31T12:00:00Z",
       checkpoint: "Saved",
-      resume: "Same-thread automation scheduled",
+      resume: "Same-thread automation verified",
+      automation: "Verified · Attempt 1/2",
+      next_wake: "2026-08-31T12:00:00Z",
       status: "Waiting for quota reset",
     },
     {
@@ -183,7 +185,9 @@ test("sends a quota pause embed with local and relative reset time without expos
       "5h Remaining": "**6%**",
       "Next Reset": "<t:1788177600:t> · <t:1788177600:R>",
       Checkpoint: "✅ Saved",
-      Resume: "🔄 Same-thread automation scheduled",
+      Resume: "✅ Same-thread automation verified",
+      Automation: "Verified · Attempt 1/2",
+      "Next Wake": "<t:1788177600:t> · <t:1788177600:R>",
       Status: "Waiting for quota reset",
     },
   );

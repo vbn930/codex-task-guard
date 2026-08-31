@@ -9,6 +9,7 @@ import {
   auditRegistry,
   completeTask,
   listRegistry,
+  patchCheckpointResumeAutomation,
   readCheckpoint,
   resumeTask,
   saveCheckpoint,
@@ -311,6 +312,73 @@ test("heartbeat patch preserves every existing pause field", async () => {
   assert.equal(result.heartbeat_automation_id, "automation-123");
   const [registryEntry] = Object.values((await listRegistry({ taskGuardHome })).tasks);
   assert.equal(registryEntry.heartbeat_automation_id, "automation-123");
+});
+
+test("resume automation narrow patch preserves authoritative pause state and drops private fields", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-automation-state",
+      task_description: "Verify resume automation persistence",
+      status: "PAUSED_FOR_QUOTA",
+      quota_snapshot: {
+        snapshot_id: "snapshot-A",
+        observed_at: "2026-08-31T12:24:00.000Z",
+        freshness: "AUTHORITATIVE",
+      },
+      resume_after: "2026-08-31T17:32:11.000Z",
+      exact_next_actions: ["Continue exact action"],
+      thread_reference: "thread-123",
+    },
+  });
+  const before = await readCheckpoint(saved.checkpoint_path);
+
+  await patchCheckpointResumeAutomation({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-automation-state",
+    resumeAutomation: {
+      purpose: "quota_resume",
+      status: "VERIFIED",
+      automation_id: "automation-123",
+      attempts: 1,
+      verified_at: "2026-08-31T13:00:00.000Z",
+      target_thread: "thread-123",
+      resume_after: "2026-08-31T17:32:11.000Z",
+      snapshot_id: "snapshot-A",
+      automation_fingerprint: "fingerprint-1",
+      verification: {
+        persisted: true,
+        identity_match: true,
+        kind_match: true,
+        thread_match: true,
+        schedule_match: true,
+        status_active: true,
+        prompt_match: true,
+      },
+      prompt: "must not be persisted",
+      raw_tool_response: { secret: "must not be persisted" },
+    },
+  });
+
+  const after = await readCheckpoint(saved.checkpoint_path);
+  const preserved = structuredClone(after);
+  delete preserved.resume_automation;
+  delete preserved.resume_mode;
+  delete preserved.heartbeat_automation_id;
+  assert.deepEqual(preserved, before);
+  assert.equal(after.resume_mode, "AUTOMATION");
+  assert.equal(after.heartbeat_automation_id, "automation-123");
+  assert.equal(after.resume_automation.status, "VERIFIED");
+  assert.equal("prompt" in after.resume_automation, false);
+  assert.equal("raw_tool_response" in after.resume_automation, false);
+  assert.equal(after.quota_snapshot.snapshot_id, "snapshot-A");
+  assert.equal(after.resume_after, "2026-08-31T17:32:11.000Z");
+  assert.deepEqual(after.exact_next_actions, ["Continue exact action"]);
+  assert.equal(after.task_id, "task-automation-state");
+  assert.equal(after.thread_reference, "thread-123");
 });
 
 test("reads checkpoints written with the original JSON machine-state format", async () => {

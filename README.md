@@ -44,7 +44,9 @@ node scripts/task-guard.mjs phase finish --project C:\path\to\project --phase-id
 node scripts/task-guard.mjs history list --limit 100
 node scripts/task-guard.mjs budget evaluate --input budget.json
 node scripts/task-guard.mjs pause prepare --project C:\path\to\project --input pause.json
+node scripts/task-guard.mjs pause finalize --project C:\path\to\project --task-id task-24 --input automation-result.json
 node scripts/task-guard.mjs resume prepare --project C:\path\to\project --task-id task-24 --input resume.json
+node scripts/task-guard.mjs checkpoint automation set --project C:\path\to\project --task-id task-24 --input automation-state.json
 node scripts/task-guard.mjs checkpoint heartbeat set --project C:\path\to\project --task-id task-24 --automation-id automation-id
 node scripts/task-guard.mjs checkpoint heartbeat clear --project C:\path\to\project --task-id task-24
 node scripts/task-guard.mjs checkpoint save --project C:\path\to\project --input state.json
@@ -86,11 +88,11 @@ V1 estimates only an exact plan/model/reasoning/phase-type cohort. Samples are e
 
 The readable checkpoint is `<project>/.codex/task-guard-checkpoint.md`. Task Guard resolves Git's effective repository-local exclude path, including linked worktrees, and leaves tracked `.gitignore` untouched. The global registry is `%CODEX_HOME%\task-guard\index.json` or `%USERPROFILE%\.codex\task-guard\index.json` and stores only lookup metadata. Registry updates are serialized across concurrent projects. `checkpoint list` audits those paths and marks missing checkpoint files as stale.
 
-At quota pause, `pause prepare` attempts one refresh and always attempts checkpoint schema-v2 preservation. Only an authoritative five-hour snapshot with a verified reset produces scheduling input; otherwise it stores an unavailable snapshot, clears `resume_after`, reports manual resume, and never promotes cached quota/reset metadata to current. Schema-v1 checkpoints and registry entries remain readable.
+At quota pause, `pause prepare` attempts one refresh and always attempts checkpoint schema-v2 preservation. Only an authoritative five-hour snapshot with a verified reset produces a heartbeat intent. Eligible automation pauses deliberately defer Discord until `pause finalize`; a create request, rendered card, or returned ID is not success. `pause finalize` first narrow-patches the sanitized read-back result, then sends the final verified/manual status. If quota/reset is unavailable, prepare records and reports manual resume immediately without promoting cached data to current. Schema-v1 checkpoints and registry entries remain readable.
 
-Heartbeat IDs are attached with `checkpoint heartbeat set` and removed with `checkpoint heartbeat clear`; these narrow patches preserve every other checkpoint field. `resume prepare` owns one authoritative snapshot across repository verification, checkpoint resume, `TASK_RESUMED`, and an optional immediate next budget decision. Task Guard re-hashes HEAD, streamed staged/unstaged diffs, status, and untracked file contents without following symbolic links. A mismatch returns `TASK_BLOCKED` with `REPOSITORY_STATE_CHANGED`, leaves the checkpoint incomplete, and never overwrites the repository or transitions it to working.
+Rich automation results are attached with `checkpoint automation set`; legacy heartbeat ID set/clear commands remain available. These narrow patches preserve every other checkpoint field and reject `VERIFIED` unless read-back persistence, identity, kind, thread, schedule, and active-status checks are true. Raw tool responses and prompts are not copied into the checkpoint. `resume prepare` owns one authoritative snapshot across repository verification, checkpoint resume, `TASK_RESUMED`, and an optional immediate next budget decision. Task Guard re-hashes HEAD, streamed staged/unstaged diffs, status, and untracked file contents without following symbolic links. A mismatch returns `TASK_BLOCKED` with `REPOSITORY_STATE_CHANGED`, leaves the checkpoint incomplete, and never overwrites the repository or transitions it to working.
 
-When the Codex app exposes a current-thread heartbeat automation tool, `SKILL.md` directs the agent to use it at the verified reset time, persist its ID, and delete or disable it on resume, completion, or blockage. Otherwise the checkpoint and `resume_after` provide a manual same-thread fallback. For a scheduled run that needs local project files, [official OpenAI documentation](https://learn.chatgpt.com/docs/automations) says to keep the computer powered on and the desktop app running.
+When the Codex app exposes heartbeat create and ID-based view, `SKILL.md` directs the agent to create only a same-thread heartbeat, read it back, verify its fields, reconcile ambiguous ID-less results read-only, and retry create no more than once after confirmed absence. There is no assumed list/search API, no cron fallback, and no direct TOML mutation. Otherwise the checkpoint and `resume_after` provide a manual same-thread fallback. For a scheduled run that needs local project files, [official OpenAI documentation](https://learn.chatgpt.com/docs/automations) says to keep the computer powered on and the desktop app running.
 
 ## Discord events
 
@@ -99,7 +101,7 @@ Supported events are `TASK_STARTED`, `QUOTA_PAUSED`, `TASK_RESUMED`, `TASK_COMPL
 | Event | Color | Primary fields |
 |---|---|---|
 | `TASK_STARTED` | Blurple | Project, Task, Thread, 5h Quota, Next Reset, Status |
-| `QUOTA_PAUSED` | Yellow | Reason, 5h Remaining, Next Reset, Checkpoint, Resume, Status |
+| `QUOTA_PAUSED` | Yellow | Reason, 5h Remaining, Next Reset, Checkpoint, Resume, Automation, Next Wake, Status |
 | `TASK_RESUMED` | Blue | 5h Quota, Next Reset, Checkpoint, Repository, Resume Point, Status |
 | `TASK_COMPLETED` | Green | Validation, Quota Resets, Checkpoint, Status |
 | `TASK_BLOCKED` | Red | Reason, Detected, Required Action, Checkpoint, Status |
@@ -114,7 +116,7 @@ set TASK_GUARD_TEST_QUOTA=low
 node scripts\task-guard.mjs quota
 ```
 
-The test suite covers the app-server JSONL handshake, strict quota mapping, phase measurements, history filtering, conservative budget selection, checkpoint persistence, linked worktrees, concurrent registry updates, large diffs, external repository changes, cleanup, notification safety, CLI behavior, and installation. A live quota smoke test requires the signed-in Codex CLI but does not send a model prompt. Discord tests use a mock transport and do not send a real webhook.
+The test suite covers the app-server JSONL handshake, strict quota mapping, phase measurements, history filtering, conservative budget selection, checkpoint persistence, same-thread automation create/view recovery, bounded retries, read-only filesystem reconciliation, field mismatches, linked worktrees, concurrent registry updates, large diffs, external repository changes, notification ordering, CLI behavior, and installation. Automation and Discord tests use mock adapters/transports and do not create a real automation or send a real webhook.
 
 ## Uninstall
 
@@ -124,6 +126,8 @@ Delete `%CODEX_HOME%\skills\task-guard` (or `%USERPROFILE%\.codex\skills\task-gu
 
 - Skill invocation and pause/resume decisions are agent-driven; Task Guard is not a deterministic Codex lifecycle hook.
 - Same-thread wake-up depends on the current Codex app exposing its heartbeat automation tool; it is not implemented through an assumed private API.
+- Persistence verification proves that the automation was registered and its readable fields matched. It does not guarantee that Codex Desktop will execute the future heartbeat on time.
+- The current automation tool has no global list/search operation. ID-less reconciliation uses the Windows local registry as a read-only implementation-specific fallback and cannot verify on its own.
 - The CLI cannot delete a Codex app automation itself. `resume prepare` requires `heartbeat_cleanup_confirmed: true` only after the app-layer deletion or disable operation succeeds.
 - Local scheduled resume requires the host computer to remain powered on, the desktop app to remain running, and the project to remain available on disk. System sleep, hibernation, shutdown, or closing the app can delay the run, so use the manual same-thread fallback when those conditions cannot be maintained.
 - Quota and `doctor` require the Codex CLI on `PATH`; Codex Desktop alone is not sufficient for the app-server quota probe.

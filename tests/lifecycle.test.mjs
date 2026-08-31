@@ -12,6 +12,7 @@ import {
 } from "../scripts/lib/checkpoint.mjs";
 import {
   completePhaseAndDecide,
+  finalizeQuotaPause,
   preparePhase,
   prepareQuotaPause,
   prepareTaskResume,
@@ -203,7 +204,7 @@ test("phase prepare does not create an active phase when no phase fits", async (
   assert.equal(laterStart.phase_id, "manual-calibration");
 });
 
-test("quota pause shares one authoritative reset across checkpoint registry Discord and scheduling", async () => {
+test("quota pause defers Discord until a verified automation result is checkpointed", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-pause-boundary-"));
   const projectPath = path.join(root, "project");
   const taskGuardHome = path.join(root, "global");
@@ -223,7 +224,7 @@ test("quota pause shares one authoritative reset across checkpoint registry Disc
       }, { source: "test_fixture", observedAt });
     },
   });
-  let discordBody;
+  let discordBody = null;
   let checkpointExistedBeforeDiscord = false;
 
   const result = await prepareQuotaPause({
@@ -242,7 +243,6 @@ test("quota pause shares one authoritative reset across checkpoint registry Disc
       task: "Implement authoritative quota snapshots",
       reason: "No measured phase fits",
       checkpoint: "Saved",
-      resume: "Same-thread automation scheduled",
       status: "Waiting for quota reset",
     },
     notifyOptions: {
@@ -258,7 +258,56 @@ test("quota pause shares one authoritative reset across checkpoint registry Disc
     },
   });
 
-  const checkpoint = await readCheckpoint(result.checkpoint.checkpoint_path);
+  assert.equal(discordBody, null);
+  assert.equal(result.notification, null);
+  assert.equal(result.automation_intent.kind, "heartbeat");
+  assert.equal(result.automation_intent.destination, "thread");
+  assert.equal(result.automation_intent.target_thread, "current");
+
+  const finalized = await finalizeQuotaPause({
+    projectPath,
+    taskGuardHome,
+    taskId: "fresh-pause",
+    resumeAutomation: {
+      purpose: "quota_resume",
+      status: "VERIFIED",
+      automation_id: "automation-verified",
+      attempts: 1,
+      verified_at: "2026-08-31T13:00:00.000Z",
+      target_thread: "current",
+      resume_after: resetAt,
+      snapshot_id: result.snapshot.snapshot_id,
+      automation_fingerprint: result.automation_intent.automation_fingerprint,
+      verification: {
+        persisted: true,
+        identity_match: true,
+        kind_match: true,
+        thread_match: true,
+        schedule_match: true,
+        status_active: true,
+        prompt_match: true,
+      },
+    },
+    notificationPayload: {
+      project: "codex-task-guard",
+      task: "Implement authoritative quota snapshots",
+      reason: "No measured phase fits",
+      status: "Waiting for quota reset",
+    },
+    notifyOptions: {
+      env: { CODEX_DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/secret" },
+      fetchImpl: async (_url, options) => {
+        checkpointExistedBeforeDiscord = Boolean(await readFile(
+          path.join(projectPath, ".codex", "task-guard-checkpoint.md"),
+          "utf8",
+        ));
+        discordBody = JSON.parse(options.body);
+        return { ok: true, status: 204 };
+      },
+    },
+  });
+
+  const checkpoint = await readCheckpoint(finalized.checkpoint.checkpoint_path);
   const [registryEntry] = Object.values((await listRegistry({ taskGuardHome })).tasks);
   const discordFields = Object.fromEntries(
     discordBody.embeds[0].fields.map(({ name, value }) => [name, value]),
@@ -274,7 +323,10 @@ test("quota pause shares one authoritative reset across checkpoint registry Disc
   assert.equal(registryEntry.quota_observed_at, observedAt);
   assert.equal(discordFields["5h Remaining"], "**6%**");
   assert.equal(discordFields["Next Reset"], "<t:1800000000:t> · <t:1800000000:R>");
-  assert.equal(result.notification.quota_snapshot_id, result.snapshot.snapshot_id);
+  assert.equal(discordFields.Resume, "✅ Same-thread automation verified");
+  assert.equal(discordFields.Automation, "Verified · Attempt 1/2");
+  assert.equal(finalized.notification.quota_snapshot_id, result.snapshot.snapshot_id);
+  assert.equal(checkpoint.resume_automation.status, "VERIFIED");
   assert.equal(result.automation_schedule.resume_after, resetAt);
   assert.equal(result.automation_schedule.quota_snapshot_id, result.snapshot.snapshot_id);
   assert.equal(result.automation_schedule.quota_observed_at, observedAt);
@@ -317,7 +369,7 @@ test("quota pause preserves its checkpoint and requires manual resume when refre
       task: "Preserve failed refresh pause",
       reason: "Codex rate-limit rejection",
       checkpoint: "Saved",
-      resume: "Same-thread automation scheduled",
+      resume: "Manual resume required",
       status: "Waiting for quota reset",
     },
     notifyOptions: {
@@ -345,7 +397,71 @@ test("quota pause preserves its checkpoint and requires manual resume when refre
   assert.equal(fields["5h Remaining"], "**Unavailable (refresh failed)**");
   assert.equal("Next Reset" in fields, false);
   assert.equal(fields.Checkpoint, "✅ Saved");
-  assert.equal(fields.Resume, "🔄 Manual resume required");
+  assert.equal(fields.Resume, "⚠️ Manual resume required");
+});
+
+test("failed automation verification is checkpointed before manual-resume Discord", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-pause-final-failure-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  execFileSync("git", ["init", "-q", projectPath]);
+  const resetAt = "2027-01-15T08:00:00.000Z";
+  const current = snapshot(5, "2026-08-31T12:24:00.000Z", resetAt);
+  await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "failed-automation",
+      task_description: "Fall back after verification failure",
+      status: "PAUSED_FOR_QUOTA",
+      quota_snapshot: current,
+      resume_after: resetAt,
+      exact_next_actions: ["Resume manually"],
+      thread_reference: "thread-failed",
+    },
+  });
+  let body;
+
+  const result = await finalizeQuotaPause({
+    projectPath,
+    taskGuardHome,
+    taskId: "failed-automation",
+    resumeAutomation: {
+      purpose: "quota_resume",
+      status: "FAILED",
+      automation_id: null,
+      attempts: 2,
+      target_thread: "thread-failed",
+      resume_after: resetAt,
+      snapshot_id: current.snapshot_id,
+      last_error: "PERSISTENCE_NOT_VERIFIED",
+      resolution: "MANUAL_FALLBACK",
+    },
+    notificationPayload: {
+      project: "codex-task-guard",
+      task: "Fall back after verification failure",
+      reason: "Quota pause",
+      status: "Waiting for manual resume",
+    },
+    notifyOptions: {
+      env: { CODEX_DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/secret" },
+      fetchImpl: async (_url, options) => {
+        const checkpoint = await readCheckpoint(path.join(
+          projectPath,
+          ".codex",
+          "task-guard-checkpoint.md",
+        ));
+        assert.equal(checkpoint.resume_automation.status, "FAILED");
+        body = JSON.parse(options.body);
+        return { ok: true, status: 204 };
+      },
+    },
+  });
+
+  const fields = Object.fromEntries(body.embeds[0].fields.map(({ name, value }) => [name, value]));
+  assert.equal(result.resume_mode, "MANUAL");
+  assert.equal(fields.Resume, "⚠️ Manual resume required");
+  assert.equal(fields.Automation, "Registration could not be verified");
 });
 
 test("quota pause blocks automation but keeps the checkpoint when reset is unverified", async () => {

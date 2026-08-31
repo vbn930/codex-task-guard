@@ -10,6 +10,28 @@ Verified on 2026-08-31 with Codex CLI `0.151.0-alpha.7.2` and Codex desktop `26.
 - The current Codex app exposes a stable local-automation feature and a current-thread heartbeat tool to the agent. It is not part of this utility's app-server contract, so automation is optional and instruction-driven. Checkpoint plus `resume_after` remains the fallback.
 - The repository began empty, with no existing implementation or compatibility surface.
 
+## Same-thread automation probe
+
+Re-verified on 2026-08-31 before implementing resume-automation recovery:
+
+- The current thread exposes exactly one Codex automation capability: `mcp__codex_app__automation_update`.
+- Its explicit input union exposes heartbeat `create`/`suggested_create` and ID-based `mode: "view"`. The capability description mentions update/delete, but those payload arms are opaque (`unknown`), so Task Guard does not depend on them for correctness.
+- There is no exposed automation list or name/metadata search operation.
+- Heartbeat creation exposes `destination: "thread"` and `targetThreadId`; detached cron is therefore not a same-thread fallback.
+- `%USERPROFILE%\.codex\automations` existed but contained no automation directories. No existing ID was available for a safe read-only `view` probe.
+- A live test automation was deliberately not created because it would mutate the user's scheduler. Create, view, not-found, UI-card-only, and persisted heartbeat response variants are covered through the agent adapter's deterministic fixtures instead.
+
+The local automation directory is treated only as a read-only, Windows-specific reconciliation aid after an ambiguous ID-less create result. It is not a public API, it is never edited, and a filesystem match alone cannot produce `VERIFIED`.
+
+## Verification design derived from the probe
+
+- The Node utility owns the expected logical identity, response normalization, field comparison, bounded retry policy, reconciliation, sanitized checkpoint state, and Discord rendering. The Codex agent remains the adapter that invokes the exposed automation tool.
+- Create responses are classified as ID received, UI rendered only, ambiguous, or structural failure. IDs are accepted only from explicit ID fields/text; no synthetic ID is generated.
+- ID-based views are normalized from structured objects or conservative labeled text. Verification requires matching logical name, heartbeat kind, active status, target thread, reset/wake semantics, and prompt when available.
+- View persistence gets at most three short reads. Create gets at most two attempts. An ambiguous create always reconciles before any retry; a persisted mismatch never triggers blind recreation because safe update/delete payloads were not established.
+- A one-shot schedule represented as `DTSTART` plus `FREQ=DAILY;COUNT=1` is accepted when its first wake is at or within five minutes after the verified reset. An unbounded daily recurrence is rejected as `SCHEDULE_MISMATCH`.
+- `VERIFIED` means persistence and readable-field verification only. Scheduler execution remains a separate future event and is not guaranteed.
+
 ## Runtime decision
 
 | Runtime | Current environment | Assessment |

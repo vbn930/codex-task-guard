@@ -5,7 +5,9 @@ const PAUSED_FIELDS = [
   ["five_hour_remaining", "5h Remaining", true, boldPercent],
   ["reset", "Next Reset", true, timestampSummary],
   ["checkpoint", "Checkpoint", true, (value) => withPrefix(value, "✅")],
-  ["resume", "Resume", true, (value) => withPrefix(value, "🔄")],
+  ["resume", "Resume", true, resumeSummary],
+  ["automation", "Automation", true],
+  ["next_wake", "Next Wake", true, timestampSummary],
   ["status", "Status", false],
 ];
 
@@ -112,6 +114,15 @@ function timestampSummary(value) {
 function withPrefix(value, prefix) {
   const text = clean(value).trim();
   return text.startsWith(prefix) ? text : `${prefix} ${text}`;
+}
+
+function resumeSummary(value) {
+  const text = clean(value).trim();
+  if (/verified/i.test(text) && !/not persisted|could not/i.test(text)) {
+    return withPrefix(text, "✅");
+  }
+  if (/manual|required|not persisted|unverified/i.test(text)) return withPrefix(text, "⚠️");
+  return withPrefix(text, "🔄");
 }
 
 function buildFields(definitions, payload) {

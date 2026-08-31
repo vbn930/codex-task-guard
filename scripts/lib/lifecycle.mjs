@@ -1,11 +1,13 @@
 import {
   clearCheckpointHeartbeat,
+  patchCheckpointResumeAutomation,
   readCheckpoint,
   resolveCheckpointPath,
   resumeTask,
   saveCheckpoint,
   verifyCheckpoint,
 } from "./checkpoint.mjs";
+import { buildResumeAutomationIntent } from "./automation.mjs";
 import { notifyDiscord } from "./discord.mjs";
 import {
   unavailableQuotaSnapshot,
@@ -236,6 +238,20 @@ export async function prepareQuotaPause({
   }
   const hasVerifiedReset = automationScheduleError === null;
   const resumeAfter = hasVerifiedReset ? snapshot.five_hour.reset_at : null;
+  const targetThread = checkpointState.thread_reference ?? "current";
+  const automationIntent = hasVerifiedReset
+    ? buildResumeAutomationIntent({
+      taskId: checkpointState.task_id,
+      targetThread,
+      resumeAfter,
+      snapshotId: snapshot.snapshot_id,
+      prompt: [
+        "Resume this same Codex task after the verified quota reset.",
+        "Recheck quota, run Task Guard resume prepare for the existing checkpoint, then continue the exact next action.",
+        "Do not create a new task.",
+      ].join(" "),
+    })
+    : null;
 
   const state = {
     ...checkpointState,
@@ -248,17 +264,35 @@ export async function prepareQuotaPause({
       weekly: snapshot.weekly,
     },
     resume_after: resumeAfter,
+    thread_reference: targetThread,
+    resume_mode: hasVerifiedReset ? "AUTOMATION_ELIGIBLE" : "MANUAL",
+    resume_automation: hasVerifiedReset ? {
+      purpose: "quota_resume",
+      status: "ELIGIBLE",
+      automation_id: null,
+      attempts: 0,
+      target_thread: targetThread,
+      resume_after: resumeAfter,
+      snapshot_id: snapshot.snapshot_id,
+      automation_fingerprint: automationIntent.automation_fingerprint,
+    } : {
+      purpose: "quota_resume",
+      status: "FAILED",
+      automation_id: null,
+      attempts: 0,
+      last_error: automationScheduleError,
+      resolution: "MANUAL_FALLBACK",
+    },
   };
   const savedCheckpoint = await saveCheckpoint({ projectPath, state, taskGuardHome });
   const checkpoint = { ...savedCheckpoint, saved: true };
-  const notification = await notifyDiscord(
+  const notification = hasVerifiedReset ? null : await notifyDiscord(
     "QUOTA_PAUSED",
     {
       ...notificationPayload,
       checkpoint: "Saved",
-      resume: hasVerifiedReset
-        ? notificationPayload?.resume
-        : "Manual resume required",
+      resume: "Manual resume required",
+      automation: "Registration could not be attempted",
     },
     { ...notifyOptions, snapshot },
   );
@@ -267,6 +301,7 @@ export async function prepareQuotaPause({
     snapshot,
     checkpoint,
     notification,
+    automation_intent: automationIntent,
     automation_schedule: hasVerifiedReset ? {
       resume_after: resumeAfter,
       quota_snapshot_id: snapshot.snapshot_id,
@@ -275,4 +310,47 @@ export async function prepareQuotaPause({
     automation_schedule_error: automationScheduleError,
     resume_mode: hasVerifiedReset ? "AUTOMATION_ELIGIBLE" : "MANUAL",
   };
+}
+
+export async function finalizeQuotaPause({
+  projectPath,
+  taskId,
+  resumeAutomation,
+  notificationPayload,
+  taskGuardHome,
+  notifyOptions,
+}) {
+  const checkpointPath = await resolveCheckpointPath(projectPath);
+  const state = await readCheckpoint(checkpointPath);
+  if (state.task_id !== taskId) {
+    throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
+  }
+  const checkpoint = await patchCheckpointResumeAutomation({
+    projectPath,
+    taskId,
+    resumeAutomation,
+    taskGuardHome,
+  });
+  const finalizedAutomation = checkpoint.resume_automation;
+  const verified = finalizedAutomation.status === "VERIFIED";
+  const creationUnverified = ["UI_RENDERED", "CREATE_REQUESTED", "RECONCILING"]
+    .includes(finalizedAutomation.status);
+  const notification = await notifyDiscord(
+    "QUOTA_PAUSED",
+    {
+      ...notificationPayload,
+      checkpoint: "Saved",
+      resume: verified
+        ? "Same-thread automation verified"
+        : creationUnverified
+          ? "Creation not persisted/verified"
+          : "Manual resume required",
+      automation: verified
+        ? `Verified · Attempt ${finalizedAutomation.attempts}/2`
+        : "Registration could not be verified",
+      ...(verified ? { next_wake: finalizedAutomation.resume_after } : {}),
+    },
+    { ...notifyOptions, snapshot: state.quota_snapshot },
+  );
+  return { checkpoint, notification, resume_mode: verified ? "AUTOMATION" : "MANUAL" };
 }
