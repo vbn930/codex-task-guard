@@ -96,6 +96,39 @@ test("save reports recoverable success when the derived registry write fails", a
   assert.equal((await readCheckpoint(result.checkpoint_path)).task_id, "task-save-recovery");
 });
 
+test("save remains authoritative when the derived registry cannot be read", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-save-read-recovery",
+      task_description: "Initial checkpoint state",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Replace this action"],
+    },
+  });
+  await writeFile(path.join(taskGuardHome, "index.json"), "{corrupted}\n");
+
+  const result = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-save-read-recovery",
+      task_description: "Updated checkpoint state",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Repair the registry"],
+    },
+  });
+
+  assert.equal(result.checkpoint_updated, true);
+  assert.equal(result.registry_updated, false);
+  assert.equal(result.recovery_required, true);
+  assert.equal(result.error.code, "REGISTRY_UPDATE_FAILED");
+  assert.equal((await readCheckpoint(saved.checkpoint_path)).task_description,
+    "Updated checkpoint state");
+});
+
 test("generic checkpoint save rejects transient automation evidence", async () => {
   const { projectPath, taskGuardHome } = await createProject();
 
@@ -221,6 +254,33 @@ test("completion reports stale derived metadata and retries idempotently", async
   assert.equal(retried.registry_updated, true);
   assert.equal(retried.recovery_required, false);
   assert.deepEqual((await listRegistry({ taskGuardHome })).tasks, {});
+});
+
+test("completion reports recoverable success when the registry cannot be read", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-complete-read-recovery",
+      task_description: "Complete despite corrupt derived metadata",
+      status: "WORKING",
+      exact_next_actions: ["Repair the registry"],
+    },
+  });
+  await writeFile(path.join(taskGuardHome, "index.json"), "{corrupted}\n");
+
+  const result = await completeTask({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-complete-read-recovery",
+  });
+
+  assert.equal(result.checkpoint_removed, true);
+  assert.equal(result.registry_updated, false);
+  assert.equal(result.recovery_required, true);
+  assert.equal(result.recovery_action, "REGISTRY_PRUNE");
+  await assert.rejects(readCheckpoint(saved.checkpoint_path), { code: "ENOENT" });
 });
 
 test("registry audit marks a missing project checkpoint as stale", async () => {
@@ -513,6 +573,35 @@ test("resume rebuilds a missing derived registry entry", async () => {
   assert.equal(entry.status, "working");
 });
 
+test("resume remains authoritative when the derived registry cannot be read", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-resume-read-recovery",
+      task_description: "Keep resumed state authoritative",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Repair the registry"],
+    },
+  });
+  const verification = await verifyCheckpoint(saved.checkpoint_path);
+  await writeFile(path.join(taskGuardHome, "index.json"), "{corrupted}\n");
+
+  const result = await resumeTask({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-resume-read-recovery",
+    repositoryVerification: verification,
+    heartbeatCleanupConfirmed: true,
+  });
+
+  assert.equal(result.checkpoint_updated, true);
+  assert.equal(result.registry_updated, false);
+  assert.equal(result.recovery_required, true);
+  assert.equal((await readCheckpoint(saved.checkpoint_path)).status, "WORKING");
+});
+
 test("heartbeat patch preserves every existing pause field", async () => {
   const { projectPath, taskGuardHome } = await createProject();
   const saved = await saveCheckpoint({
@@ -623,6 +712,61 @@ test("heartbeat patch reports a recoverable registry partial write", async () =>
   assert.equal(repaired.registry_updated, true);
   assert.equal(Object.values((await listRegistry({ taskGuardHome })).tasks)[0]
     .heartbeat_automation_id, "automation-recovery");
+});
+
+test("registry repair rebuilds the index when its JSON is corrupted", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-corrupt-registry-repair",
+      task_description: "Rebuild a corrupted derived index",
+      status: "PAUSED_FOR_QUOTA",
+      heartbeat_automation_id: "automation-repair",
+      exact_next_actions: ["Repair the registry"],
+    },
+  });
+  await writeFile(path.join(taskGuardHome, "index.json"), "{corrupted}\n");
+
+  const repaired = await repairCheckpointRegistry({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-corrupt-registry-repair",
+  });
+
+  const [entry] = Object.values((await listRegistry({ taskGuardHome })).tasks);
+  assert.equal(repaired.registry_updated, true);
+  assert.equal(entry.task_id, "task-corrupt-registry-repair");
+  assert.equal(entry.heartbeat_automation_id, "automation-repair");
+});
+
+test("heartbeat patch remains authoritative when the derived registry cannot be read", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-heartbeat-read-recovery",
+      task_description: "Keep heartbeat state authoritative",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Repair the registry"],
+    },
+  });
+  await writeFile(path.join(taskGuardHome, "index.json"), "{corrupted}\n");
+
+  const result = await setCheckpointHeartbeat({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-heartbeat-read-recovery",
+    automationId: "automation-read-recovery",
+  });
+
+  assert.equal(result.checkpoint_updated, true);
+  assert.equal(result.registry_updated, false);
+  assert.equal(result.recovery_required, true);
+  assert.equal((await readCheckpoint(saved.checkpoint_path)).heartbeat_automation_id,
+    "automation-read-recovery");
 });
 
 test("resume automation narrow patch preserves authoritative pause state and drops private fields", async () => {
@@ -868,6 +1012,40 @@ test("resume automation patch keeps checkpoint authoritative on registry failure
   const entry = Object.values((await listRegistry({ taskGuardHome })).tasks)[0];
   assert.equal(entry.resume_mode, "manual");
   assert.equal(entry.resume_automation_status, "failed");
+});
+
+test("resume automation patch remains authoritative when the registry cannot be read", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-automation-read-recovery",
+      task_description: "Keep automation state authoritative",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Repair derived metadata"],
+    },
+  });
+  await writeFile(path.join(taskGuardHome, "index.json"), "{corrupted}\n");
+
+  const result = await patchCheckpointResumeAutomation({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-automation-read-recovery",
+    resumeAutomation: {
+      purpose: "quota_resume",
+      status: "FAILED",
+      automation_id: null,
+      attempts: 1,
+      last_error: "NOT_FOUND",
+      resolution: "MANUAL_FALLBACK",
+    },
+  });
+
+  assert.equal(result.checkpoint_updated, true);
+  assert.equal(result.registry_updated, false);
+  assert.equal(result.recovery_required, true);
+  assert.equal((await readCheckpoint(saved.checkpoint_path)).resume_automation.status, "FAILED");
 });
 
 test("reads checkpoints written with the original JSON machine-state format", async () => {
