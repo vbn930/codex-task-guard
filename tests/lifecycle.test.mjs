@@ -114,6 +114,95 @@ test("phase completion history decision and Discord share the refreshed snapshot
   assert.equal(refreshReads, 1);
 });
 
+test("phase finish validates the next budget request before committing the active phase", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-finish-validation-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  execFileSync("git", ["init", "-q", projectPath]);
+  const before = snapshot(20, "2026-08-31T12:20:00.000Z");
+  const after = snapshot(15, "2026-08-31T12:24:00.000Z");
+  await startPhase({
+    projectPath,
+    taskGuardHome,
+    snapshot: before,
+    metadata: {
+      task_id: "finish-validation",
+      phase_id: "work",
+      phase_type: "testing",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+    },
+  });
+  const common = {
+    projectPath,
+    taskGuardHome,
+    phaseId: "work",
+    concurrentUsage: false,
+    snapshotStore: { refresh: async () => after },
+    safetyReservePercent: 5,
+  };
+
+  await assert.rejects(
+    completePhaseAndDecide({ ...common, phases: [{}] }),
+    /phases\[0\]\.phase_id must be a non-empty string/,
+  );
+
+  const retried = await completePhaseAndDecide({
+    ...common,
+    phases: [{
+      phase_id: "next",
+      phase_type: "testing",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+      dependencies_met: true,
+    }],
+  });
+  assert.equal(retried.measurement.phase_id, "work");
+});
+
+test("phase finish reads usage history before committing the active phase", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-finish-history-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  execFileSync("git", ["init", "-q", projectPath]);
+  const before = snapshot(20, "2026-08-31T12:20:00.000Z");
+  const after = snapshot(15, "2026-08-31T12:24:00.000Z");
+  await startPhase({
+    projectPath,
+    taskGuardHome,
+    snapshot: before,
+    metadata: {
+      task_id: "finish-history",
+      phase_id: "work",
+      phase_type: "testing",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+    },
+  });
+  await writeFile(path.join(taskGuardHome, "usage-history.jsonl"), "{corrupted}\n");
+  const options = {
+    projectPath,
+    taskGuardHome,
+    phaseId: "work",
+    concurrentUsage: false,
+    snapshotStore: { refresh: async () => after },
+    phases: [{
+      phase_id: "next",
+      phase_type: "testing",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+      dependencies_met: true,
+    }],
+    safetyReservePercent: 5,
+  };
+
+  await assert.rejects(completePhaseAndDecide(options), /JSON/);
+  await writeFile(path.join(taskGuardHome, "usage-history.jsonl"), "");
+
+  const retried = await completePhaseAndDecide(options);
+  assert.equal(retried.measurement.phase_id, "work");
+});
+
 test("phase prepare uses one authoritative snapshot for decision and phase start", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-phase-prepare-"));
   const projectPath = path.join(root, "project");
@@ -725,6 +814,50 @@ test("duplicate resume wake is idempotent and emits no second side effects", asy
   assert.equal(notificationCalls, 1);
   assert.equal(afterFirst.resume_automation.status, "EXECUTED");
   assert.deepEqual(afterSecond, afterFirst);
+});
+
+test("resume cleans verified automation even when legacy heartbeat metadata is missing", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-resume-cleanup-fallback-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  execFileSync("git", ["init", "-q", projectPath]);
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "resume-cleanup-fallback",
+      task_description: "Clean verified automation before resume",
+      status: "PAUSED_FOR_QUOTA",
+      resume_automation: {
+        purpose: "quota_resume",
+        status: "VERIFIED",
+        automation_id: "automation-fallback",
+        cleanup_required: true,
+      },
+      exact_next_actions: ["Continue after cleanup"],
+    },
+  });
+  let cleanedAutomationId = null;
+
+  const result = await prepareTaskResume({
+    projectPath,
+    taskGuardHome,
+    taskId: "resume-cleanup-fallback",
+    snapshotStore: {
+      refresh: async () => snapshot(100, "2026-08-31T12:31:00.000Z"),
+    },
+    cleanupHeartbeat: async ({ automationId }) => {
+      cleanedAutomationId = automationId;
+      return true;
+    },
+    notifyOptions: { env: {} },
+  });
+
+  const checkpoint = await readCheckpoint(saved.checkpoint_path);
+  assert.equal(result.status, "TASK_RESUMED");
+  assert.equal(cleanedAutomationId, "automation-fallback");
+  assert.equal(checkpoint.resume_automation.status, "EXECUTED");
+  assert.equal(checkpoint.resume_automation.cleanup_required, false);
 });
 
 test("task resume blocks without a working transition when repository verification fails", async () => {

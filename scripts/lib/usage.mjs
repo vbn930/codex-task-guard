@@ -329,7 +329,7 @@ export function estimatePhaseCost({ history, phase }) {
   };
 }
 
-export function evaluateBudget({
+export function validateBudgetInput({
   history,
   phases,
   snapshot,
@@ -361,6 +361,21 @@ export function evaluateBudget({
       throw new Error(`${name} must be between 0 and 100`);
     }
   }
+  return { authoritative, remainingPercent };
+}
+
+export function evaluateBudget({
+  history,
+  phases,
+  snapshot,
+  safetyReservePercent,
+}) {
+  const { authoritative, remainingPercent } = validateBudgetInput({
+    history,
+    phases,
+    snapshot,
+    safetyReservePercent,
+  });
   const availableBudget = Math.max(0, remainingPercent - safetyReservePercent);
   const evaluated = phases.map((phase) => {
     if (phase.dependencies_met !== true) {

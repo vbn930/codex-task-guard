@@ -8,7 +8,6 @@ import {
   readCheckpoint,
   repairCheckpointRegistry,
   resolveCheckpointPath,
-  resumeTask,
   saveCheckpoint,
   setCheckpointHeartbeat,
   verifyCheckpoint,
@@ -149,12 +148,6 @@ async function checkpointCommand(args) {
     printJson(await auditRegistry());
     return 0;
   }
-  if (action === "resume") {
-    const projectPath = optionValue(options, "--project") ?? process.cwd();
-    const taskId = optionValue(options, "--task-id", { required: true });
-    printJson(await resumeTask({ projectPath, taskId }));
-    return 0;
-  }
   if (action === "complete") {
     const projectPath = optionValue(options, "--project") ?? process.cwd();
     const taskId = optionValue(options, "--task-id", { required: true });
@@ -162,7 +155,7 @@ async function checkpointCommand(args) {
     return 0;
   }
   throw new Error(
-    "checkpoint action must be automation, heartbeat, registry, save, show, verify, list, resume, or complete",
+    "checkpoint action must be automation, heartbeat, registry, save, show, verify, list, or complete",
   );
 }
 
@@ -335,7 +328,7 @@ async function resumeCommand(args) {
 }
 
 function printHelp() {
-  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  doctor [--project PATH]\n  automation verify --input FILE| -\n  phase prepare --project PATH --input FILE| -\n  phase start --project PATH --input FILE| -\n  phase complete --project PATH --phase-id ID [--concurrent-usage true|false|unknown]\n  phase finish --project PATH --phase-id ID --input FILE| -\n  history list [--limit N]\n  budget evaluate --input FILE| -\n  pause prepare --project PATH --input FILE| -\n  pause finalize --project PATH --task-id ID --input FILE| -\n  resume prepare --project PATH --task-id ID --input FILE| -\n  checkpoint automation set --project PATH --task-id ID --input FILE| -\n  checkpoint heartbeat set --project PATH --task-id ID --automation-id ID\n  checkpoint heartbeat clear --project PATH --task-id ID\n  checkpoint registry repair --project PATH --task-id ID\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint resume --project PATH --task-id ID\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
+  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  doctor [--project PATH]\n  automation verify --input FILE| -\n  phase prepare --project PATH --input FILE| -\n  phase start --project PATH --input FILE| -\n  phase complete --project PATH --phase-id ID [--concurrent-usage true|false|unknown]\n  phase finish --project PATH --phase-id ID --input FILE| -\n  history list [--limit N]\n  budget evaluate --input FILE| -\n  pause prepare --project PATH --input FILE| -\n  pause finalize --project PATH --task-id ID --input FILE| -\n  resume prepare --project PATH --task-id ID --input FILE| -\n  checkpoint automation set --project PATH --task-id ID --input FILE| -\n  checkpoint heartbeat set --project PATH --task-id ID --automation-id ID\n  checkpoint heartbeat clear --project PATH --task-id ID\n  checkpoint registry repair --project PATH --task-id ID\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
 }
 
 export async function main(argv = process.argv.slice(2)) {

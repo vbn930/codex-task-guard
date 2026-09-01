@@ -24,7 +24,7 @@ test("quota command exposes deterministic low-quota JSON", () => {
   assert.equal(output.five_hour.remaining_percent, 5);
 });
 
-test("checkpoint CLI saves, verifies, and reports a later repository conflict", async () => {
+test("checkpoint CLI saves, verifies, and refuses an unsafe direct resume", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "task-guard-cli-"));
   const project = path.join(root, "project");
   const home = path.join(root, "global");
@@ -50,10 +50,10 @@ test("checkpoint CLI saves, verifies, and reports a later repository conflict", 
   const resumed = run([
     "checkpoint", "resume", "--project", project, "--task-id", "cli-task",
   ], { env });
-  assert.equal(resumed.status, 0, resumed.stderr);
-  assert.equal(JSON.parse(resumed.stdout).status, "working");
+  assert.notEqual(resumed.status, 0);
+  assert.match(JSON.parse(resumed.stdout).error.message, /checkpoint action must/);
   const shown = run(["checkpoint", "show", "--checkpoint", checkpointPath], { env });
-  assert.equal(JSON.parse(shown.stdout).status, "WORKING");
+  assert.equal(JSON.parse(shown.stdout).status, "PAUSED_FOR_QUOTA");
 
   await writeFile(path.join(project, "work.txt"), "changed\n");
   const conflict = run(["checkpoint", "verify", "--checkpoint", checkpointPath], { env });

@@ -1,5 +1,4 @@
 import {
-  clearCheckpointHeartbeat,
   patchCheckpointResumeAutomation,
   readCheckpoint,
   resolveCheckpointPath,
@@ -22,6 +21,7 @@ import {
   evaluateBudget,
   readUsageHistory,
   startPhase,
+  validateBudgetInput,
 } from "./usage.mjs";
 
 function sameThreadResumePrompt() {
@@ -141,21 +141,30 @@ export async function prepareTaskResume({
       safetyReservePercent,
     })
     : null;
-  let heartbeatCleanup = { required: false, completed: true };
-  if (state.heartbeat_automation_id) {
+  const verifiedCleanupRequired = state.resume_automation?.status === "VERIFIED"
+    && state.resume_automation.cleanup_required !== false;
+  const cleanupRequired = Boolean(state.heartbeat_automation_id) || verifiedCleanupRequired;
+  const cleanupAutomationId = state.heartbeat_automation_id
+    ?? (verifiedCleanupRequired ? state.resume_automation?.automation_id : null);
+  let heartbeatCleanup = {
+    required: cleanupRequired,
+    completed: !cleanupRequired,
+  };
+  if (cleanupRequired) {
     heartbeatCleanup = {
       required: true,
       completed: false,
-      automation_id: state.heartbeat_automation_id,
+      automation_id: cleanupAutomationId,
     };
-    if (typeof cleanupHeartbeat === "function") {
+    if (!cleanupAutomationId) {
+      heartbeatCleanup.reason = "HEARTBEAT_CLEANUP_ID_REQUIRED";
+    } else if (typeof cleanupHeartbeat === "function") {
       try {
         const cleanupResult = await cleanupHeartbeat({
-          automationId: state.heartbeat_automation_id,
+          automationId: cleanupAutomationId,
           taskId,
         });
         if (cleanupResult !== false) {
-          await clearCheckpointHeartbeat({ projectPath, taskId, taskGuardHome });
           heartbeatCleanup = { ...heartbeatCleanup, completed: true };
         } else {
           heartbeatCleanup.reason = "HEARTBEAT_CLEANUP_FAILED";
@@ -193,7 +202,13 @@ export async function prepareTaskResume({
     };
   }
 
-  const resumed = await resumeTask({ projectPath, taskId, taskGuardHome });
+  const resumed = await resumeTask({
+    projectPath,
+    taskId,
+    taskGuardHome,
+    repositoryVerification: verification,
+    heartbeatCleanupConfirmed: heartbeatCleanup.completed,
+  });
   const resume = {
     ...resumed,
     quota_snapshot_id: snapshot.snapshot_id,
@@ -235,6 +250,8 @@ export async function completePhaseAndDecide({
     throw new Error("Quota snapshot store is required");
   }
   const snapshot = validateFreshness(await snapshotStore.refresh());
+  const history = await readUsageHistory({ taskGuardHome });
+  validateBudgetInput({ history, phases, snapshot, safetyReservePercent });
   const measurement = await completePhase({
     projectPath,
     phaseId,
@@ -243,7 +260,7 @@ export async function completePhaseAndDecide({
     taskGuardHome,
   });
   const decision = evaluateBudget({
-    history: await readUsageHistory({ taskGuardHome }),
+    history: [...history, measurement],
     phases,
     snapshot,
     safetyReservePercent,

@@ -72,6 +72,75 @@ test("saves a readable project checkpoint and minimal global registry entry", as
   assert.equal(restored.repository.project_path, projectPath);
 });
 
+test("save reports recoverable success when the derived registry write fails", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+
+  const result = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-save-recovery",
+      task_description: "Keep the checkpoint authoritative",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Repair the registry"],
+    },
+    registryWriter: async () => {
+      throw new Error("fault injection");
+    },
+  });
+
+  assert.equal(result.checkpoint_updated, true);
+  assert.equal(result.registry_updated, false);
+  assert.equal(result.recovery_required, true);
+  assert.equal(result.error.code, "REGISTRY_UPDATE_FAILED");
+  assert.equal((await readCheckpoint(result.checkpoint_path)).task_id, "task-save-recovery");
+});
+
+test("generic checkpoint save rejects transient automation evidence", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+
+  await assert.rejects(
+    saveCheckpoint({
+      projectPath,
+      taskGuardHome,
+      state: {
+        task_id: "task-raw-evidence",
+        task_description: "Keep raw evidence transient",
+        status: "PAUSED_FOR_QUOTA",
+        exact_next_actions: ["Use the automation verifier"],
+        diagnostics: {
+          automation_transcript: { operations: [{ private: "do-not-store" }] },
+        },
+      },
+    }),
+    /Checkpoint state contains forbidden key: diagnostics\.automation_transcript/,
+  );
+});
+
+test("generic checkpoint save recursively rejects credential-like fields", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+
+  for (const [key, expectedPath] of [
+    ["accessToken", /context\.0\.integration\.accessToken/],
+    ["discord_webhook", /context\.0\.integration\.discord_webhook/],
+  ]) {
+    await assert.rejects(
+      saveCheckpoint({
+        projectPath,
+        taskGuardHome,
+        state: {
+          task_id: "task-secret-field",
+          task_description: "Reject credential-like checkpoint fields",
+          status: "PAUSED_FOR_QUOTA",
+          exact_next_actions: ["Remove credential material"],
+          context: [{ integration: { [key]: "do-not-store" } }],
+        },
+      }),
+      expectedPath,
+    );
+  }
+});
+
 test("detects repository changes made after the checkpoint", async () => {
   const { projectPath, taskGuardHome } = await createProject();
   const saved = await saveCheckpoint({
@@ -111,6 +180,46 @@ test("completion removes the active checkpoint and registry entry", async () => 
     taskId: "task-done",
   });
   assert.equal(result.checkpoint_removed, true);
+  assert.deepEqual((await listRegistry({ taskGuardHome })).tasks, {});
+});
+
+test("completion reports stale derived metadata and retries idempotently", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-complete-recovery",
+      task_description: "Recover stale completion metadata",
+      status: "WORKING",
+      exact_next_actions: ["Prune the registry"],
+    },
+  });
+
+  const partial = await completeTask({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-complete-recovery",
+    registryWriter: async () => {
+      throw new Error("fault injection");
+    },
+  });
+
+  assert.equal(partial.checkpoint_removed, true);
+  assert.equal(partial.registry_updated, false);
+  assert.equal(partial.recovery_required, true);
+  assert.equal(partial.recovery_action, "REGISTRY_PRUNE");
+  await assert.rejects(readCheckpoint(saved.checkpoint_path), { code: "ENOENT" });
+  assert.equal(Object.keys((await listRegistry({ taskGuardHome })).tasks).length, 1);
+
+  const retried = await completeTask({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-complete-recovery",
+  });
+  assert.equal(retried.checkpoint_removed, false);
+  assert.equal(retried.registry_updated, true);
+  assert.equal(retried.recovery_required, false);
   assert.deepEqual((await listRegistry({ taskGuardHome })).tasks, {});
 });
 
@@ -266,7 +375,13 @@ test("resuming a checkpoint marks both checkpoint and registry as working", asyn
     },
   });
 
-  const result = await resumeTask({ projectPath, taskGuardHome, taskId: "task-resume" });
+  const result = await resumeTask({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-resume",
+    repositoryVerification: await verifyCheckpoint(saved.checkpoint_path),
+    heartbeatCleanupConfirmed: true,
+  });
   const checkpoint = await readCheckpoint(saved.checkpoint_path);
   const [registryEntry] = Object.values((await listRegistry({ taskGuardHome })).tasks);
   assert.equal(checkpoint.status, "WORKING");
@@ -274,6 +389,128 @@ test("resuming a checkpoint marks both checkpoint and registry as working", asyn
   assert.equal(registryEntry.status, "working");
   assert.equal(registryEntry.resume_after, null);
   assert.equal(result.heartbeat_automation_id, "automation-123");
+  assert.equal(checkpoint.heartbeat_automation_id, undefined);
+});
+
+test("direct checkpoint resume rejects unverified repository and heartbeat cleanup", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-unsafe-resume",
+      task_description: "Reject an unsafe low-level resume",
+      status: "PAUSED_FOR_QUOTA",
+      heartbeat_automation_id: "automation-unresolved",
+      exact_next_actions: ["Resume through the lifecycle"],
+    },
+  });
+
+  await assert.rejects(
+    resumeTask({ projectPath, taskGuardHome, taskId: "task-unsafe-resume" }),
+    /Repository verification is required/,
+  );
+
+  const checkpoint = await readCheckpoint(saved.checkpoint_path);
+  assert.equal(checkpoint.status, "PAUSED_FOR_QUOTA");
+  assert.equal(checkpoint.heartbeat_automation_id, "automation-unresolved");
+});
+
+test("verified automation cannot become executed without cleanup confirmation", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-cleanup-proof",
+      task_description: "Require external cleanup proof",
+      status: "PAUSED_FOR_QUOTA",
+      resume_automation: {
+        purpose: "quota_resume",
+        status: "VERIFIED",
+        automation_id: "automation-cleanup-proof",
+        cleanup_required: true,
+      },
+      exact_next_actions: ["Confirm cleanup before resume"],
+    },
+  });
+
+  await assert.rejects(
+    resumeTask({
+      projectPath,
+      taskGuardHome,
+      taskId: "task-cleanup-proof",
+      repositoryVerification: await verifyCheckpoint(saved.checkpoint_path),
+    }),
+    /Heartbeat cleanup confirmation is required/,
+  );
+
+  assert.equal((await readCheckpoint(saved.checkpoint_path)).resume_automation.status, "VERIFIED");
+});
+
+test("resume reports recoverable success when the derived registry write fails", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-resume-recovery",
+      task_description: "Keep resumed state authoritative",
+      status: "PAUSED_FOR_QUOTA",
+      heartbeat_automation_id: "automation-cleaned",
+      exact_next_actions: ["Repair the registry"],
+    },
+  });
+
+  const result = await resumeTask({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-resume-recovery",
+    repositoryVerification: await verifyCheckpoint(saved.checkpoint_path),
+    heartbeatCleanupConfirmed: true,
+    registryWriter: async () => {
+      throw new Error("fault injection");
+    },
+  });
+
+  const checkpoint = await readCheckpoint(saved.checkpoint_path);
+  assert.equal(result.checkpoint_updated, true);
+  assert.equal(result.registry_updated, false);
+  assert.equal(result.recovery_required, true);
+  assert.equal(result.error.code, "REGISTRY_UPDATE_FAILED");
+  assert.equal(checkpoint.status, "WORKING");
+  assert.equal(checkpoint.heartbeat_automation_id, undefined);
+});
+
+test("resume rebuilds a missing derived registry entry", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-resume-rebuild",
+      task_description: "Rebuild derived resume metadata",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Continue safely"],
+    },
+  });
+  await writeFile(
+    path.join(taskGuardHome, "index.json"),
+    `${JSON.stringify({ schema_version: 2, tasks: {} })}\n`,
+  );
+
+  const result = await resumeTask({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-resume-rebuild",
+    repositoryVerification: await verifyCheckpoint(saved.checkpoint_path),
+    heartbeatCleanupConfirmed: true,
+  });
+
+  const [entry] = Object.values((await listRegistry({ taskGuardHome })).tasks);
+  assert.equal(result.registry_updated, true);
+  assert.equal(entry.task_id, "task-resume-rebuild");
+  assert.equal(entry.status, "working");
 });
 
 test("heartbeat patch preserves every existing pause field", async () => {
@@ -313,6 +550,37 @@ test("heartbeat patch preserves every existing pause field", async () => {
   assert.equal(result.heartbeat_automation_id, "automation-123");
   const [registryEntry] = Object.values((await listRegistry({ taskGuardHome })).tasks);
   assert.equal(registryEntry.heartbeat_automation_id, "automation-123");
+});
+
+test("heartbeat patch rebuilds a missing derived registry entry", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-heartbeat-rebuild",
+      task_description: "Rebuild derived heartbeat metadata",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Continue after registry recovery"],
+    },
+  });
+  await writeFile(
+    path.join(taskGuardHome, "index.json"),
+    `${JSON.stringify({ schema_version: 2, tasks: {} })}\n`,
+  );
+
+  const result = await setCheckpointHeartbeat({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-heartbeat-rebuild",
+    automationId: "automation-rebuilt",
+  });
+
+  const [entry] = Object.values((await listRegistry({ taskGuardHome })).tasks);
+  assert.equal(result.registry_updated, true);
+  assert.equal(entry.task_id, "task-heartbeat-rebuild");
+  assert.equal(entry.status, "paused_for_quota");
+  assert.equal(entry.heartbeat_automation_id, "automation-rebuilt");
 });
 
 test("heartbeat patch reports a recoverable registry partial write", async () => {
@@ -457,6 +725,45 @@ test("resume automation narrow patch preserves authoritative pause state and dro
     }),
     /terminal automation state/i,
   );
+});
+
+test("resume automation patch rebuilds a missing derived registry entry", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-automation-rebuild",
+      task_description: "Rebuild derived automation metadata",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Resume manually"],
+      thread_reference: "thread-rebuild",
+    },
+  });
+  await writeFile(
+    path.join(taskGuardHome, "index.json"),
+    `${JSON.stringify({ schema_version: 2, tasks: {} })}\n`,
+  );
+
+  const result = await patchCheckpointResumeAutomation({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-automation-rebuild",
+    resumeAutomation: {
+      purpose: "quota_resume",
+      status: "FAILED",
+      automation_id: null,
+      attempts: 1,
+      last_error: "NOT_FOUND",
+      resolution: "MANUAL_FALLBACK",
+    },
+  });
+
+  const [entry] = Object.values((await listRegistry({ taskGuardHome })).tasks);
+  assert.equal(result.registry_updated, true);
+  assert.equal(entry.task_id, "task-automation-rebuild");
+  assert.equal(entry.resume_mode, "manual");
+  assert.equal(entry.resume_automation_status, "failed");
 });
 
 test("verified checkpoint automation requires every read-back invariant", async () => {
