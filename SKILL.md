@@ -47,7 +47,7 @@ When no dependency-ready phase with measured cost fits the available budget, and
 
 1. Read [references/checkpoint-input.md](references/checkpoint-input.md) and run `pause prepare`. It attempts one refresh and always attempts the checkpoint save. An authoritative verified five-hour reset is required only for `automation_schedule`, never for preserving task state.
 2. The same pause snapshot drives checkpoint, registry, and Discord. If it is `UNAVAILABLE`, any last-known snapshot remains stale context, `resume_after` is null, Discord reports quota unavailable, and `resume_mode` is `MANUAL`. Notification failure is non-fatal.
-3. Only when `resume_mode` is `AUTOMATION_ELIGIBLE`, the local host is viable, and the Codex app exposes heartbeat `create` plus ID-based `view`, create `kind: "heartbeat"` with `destination: "thread"` and the current/target thread. Never use detached `cron` as the same-thread fallback.
+3. Only when `resume_mode` is `AUTOMATION_ELIGIBLE`, the local host is viable, a concrete current-thread ID is known, and the Codex app exposes heartbeat `create` plus ID-based `view`, create `kind: "heartbeat"` with `destination: "thread"` and that concrete target. The literal `current` is not a concrete ID; if the runtime cannot expose/read back the binding, use manual fallback. Never use detached `cron` as the same-thread fallback.
 4. Record `CREATE_REQUESTED`; a create request, an automation card, and an ID are not verification. In particular:
 
    ```text
@@ -58,23 +58,25 @@ When no dependency-ready phase with measured cost fits the available budget, and
    ```
 
 5. If create returns a real automation ID, call `mcp__codex_app__automation_update({ id, mode: "view" })`. Retry that read only two or three times with short bounded delays so asynchronous persistence can settle; do not recreate after the first read miss.
-6. Normalize the view and require persisted ID, logical name, `kind: heartbeat`, active status, matching reset/wake semantics, and matching target/current-thread binding. Compare the prompt when the view exposes it. If target binding is unreadable, keep the result below `VERIFIED`.
+6. Keep raw create/view results only in memory or stdin. Pipe the operation transcript to `automation verify --input -`; the Node verifier, not the agent, derives the sanitized state. It requires the read-back ID to equal the requested ID, plus logical name, `kind: heartbeat`, active status, matching reset/wake semantics, and matching concrete thread binding. Compare the prompt when the view exposes it. A missing ID is `ID_UNVERIFIED`; a different ID is `ID_MISMATCH`; unreadable target binding stays below `VERIFIED`.
 7. A UI-only, blank, timeout, or otherwise ID-less result enters `RECONCILING`; it is never immediate success and never an immediate create retry.
-8. Because the tool exposes no list/search API, Windows may inspect `%USERPROFILE%\.codex\automations` read-only only for an ambiguous ID-less create. Match recent candidates using name, prompt, kind, thread, schedule, and request time. Never edit TOML.
+8. Because the tool exposes no list/search API, Windows may inspect `%USERPROFILE%\.codex\automations` read-only for reconciliation. Match recent candidates using name, prompt, kind, thread, schedule, and request time. Never edit TOML. Reconciliation I/O failure is terminal manual fallback, not an uncaught error.
 9. Zero high-confidence filesystem candidates means `ABSENT`. Exactly one yields an ID that still must pass tool `view`. Multiple candidates are `AMBIGUOUS`; select none and use manual fallback. Filesystem evidence alone can never produce `VERIFIED`.
-10. Retry create at most once, for a maximum of two create attempts, and only after bounded view checks plus reconciliation establish absence. Tool/schema/permission/non-local structural failures, mismatched persisted fields, and ambiguous candidates go directly to manual fallback.
-11. Run `pause finalize --project <project> --task-id <task-id> --input <result.json>`. It narrow-patches sanitized `resume_automation` state without replacing quota snapshot, reset, exact next actions, task ID, or thread reference, then sends the final Discord pause status.
+10. Retry create at most once, for a maximum of two create attempts, and only after repeated explicit `NOT_FOUND` plus reconciliation establish absence. `UNPARSEABLE_VIEW`, timeout/transport ambiguity, tool/schema/permission/non-local structural failures, mismatched persisted fields, and ambiguous candidates never authorize create retry. A recurrence can be accepted only when it is provably single-occurrence (`COUNT=1`) and its first wake is within zero to five minutes after the reset; reject every rule that can repeat.
+11. After inspecting the sanitized verifier output, pipe the same transient transcript to `pause finalize --input -`. Finalization re-runs the Node verifier, rejects hand-authored `VERIFIED` booleans, narrow-patches only sanitized `resume_automation` state, and then sends the final Discord pause status. `checkpoint automation set` cannot set `VERIFIED`.
 12. Only a fully verified result uses `resume_mode: AUTOMATION` and “Same-thread automation verified”. Every other terminal result uses `resume_mode: MANUAL`; UI rendering alone is reported as not persisted/verified.
 13. If update/delete payloads are not explicitly known in the current runtime, do not guess cleanup calls. Preserve the automation ID and `cleanup_required` state for later manual/agent cleanup.
 14. Stop execution after the final checkpoint patch and notification.
+
+The production state meanings are distinct: `CREATE_REQUESTED`, `UI_RENDERED`, `ID_RECEIVED`, `PERSISTED`, and `VERIFIED` are not aliases. `VERIFIED` requires read-back. Raw tool results must not be saved in a transcript file, checkpoint, registry, docs, or logs. If a checkpoint narrow patch reports `checkpoint_updated: true`, `registry_updated: false`, and `recovery_required: true`, treat the checkpoint as authoritative and run `checkpoint registry repair`; do not repeat automation creation.
 
 The paused state is `PAUSED_FOR_QUOTA`, not completed or failed.
 
 ## Resume
 
-After wake, delete or disable the stored heartbeat through the Codex app and run `resume prepare --project <project> --task-id <task-id> --input <resume.json>` with `heartbeat_cleanup_confirmed: true` only after that external cleanup succeeds. The resume lifecycle refreshes once, verifies checkpoint ownership and repository state, clears the stored heartbeat through the narrow patch, marks the checkpoint working, sends `TASK_RESUMED`, and optionally evaluates the next phases from the same snapshot. It derives `resume_point` from the checkpoint's first `exact_next_actions` entry; do not supply a stale copy.
+After wake, delete or disable the stored heartbeat through the Codex app and run `resume prepare --project <project> --task-id <task-id> --input <resume.json>` with `heartbeat_cleanup_confirmed: true` only after that external cleanup succeeds. The resume lifecycle refreshes once, reads and validates the paused checkpoint, verifies repository state, validates any optional budget input from the same snapshot, then clears heartbeat metadata, marks the automation `EXECUTED`, transitions to working, and sends `TASK_RESUMED`. It derives `resume_point` from the checkpoint's first `exact_next_actions` entry; do not supply a stale copy. A duplicate wake against `WORKING` returns `ALREADY_RESUMED` without cleanup, mutation, or another notification.
 
-If repository verification fails, inspect `git status`, `git diff`, and the checkpoint. The lifecycle does not run `checkpoint resume` or send `TASK_RESUMED`; it preserves the incomplete checkpoint and returns `TASK_BLOCKED`. Never overwrite external changes or trust the checkpoint over the filesystem. `checkpoint verify`, `checkpoint resume`, and standalone `notify TASK_RESUMED` remain manual/diagnostic commands, not the default automated resume flow.
+If repository verification or optional budget validation fails, inspect the input, `git status`, `git diff`, and the checkpoint. The lifecycle performs no cleanup, does not run `checkpoint resume`, and does not send `TASK_RESUMED`; repository mismatch returns `TASK_BLOCKED` and invalid input throws before mutation. Never overwrite external changes or trust the checkpoint over the filesystem. `checkpoint verify`, `checkpoint resume`, and standalone `notify TASK_RESUMED` remain manual/diagnostic commands, not the default automated resume flow.
 
 ## Snapshot ownership boundaries
 
@@ -97,6 +99,9 @@ For a genuine blocker, delete or disable any stored heartbeat automation, then s
 - Read Discord credentials only from `CODEX_DISCORD_WEBHOOK_URL`; never put them in input JSON, checkpoints, source, logs, or messages.
 - If Discord is disabled or fails, continue the task lifecycle and report only the notification result.
 - If checkpoint writing fails, the pause failed; retain the current task state and report the error.
+- If checkpoint succeeds but the derived registry write fails, do not repeat the lifecycle action. Report the structured partial result and repair the registry from the authoritative checkpoint.
 - If checkpoint save reports `ACTIVE_CHECKPOINT_EXISTS`, do not overwrite it. Resume or complete the existing task, or ask the user which task should retain the repository checkpoint.
 - If quota reading fails, report `UNKNOWN`; do not convert the failure into `SAFE` or `LOW`.
 - Do not consume rate-limit reset credits. This skill is read-only with respect to account quota.
+
+`PERSISTENCE VERIFIED != FUTURE EXECUTION GUARANTEED`. Persistence verification does not claim that the Codex Desktop scheduler will deliver the future heartbeat.

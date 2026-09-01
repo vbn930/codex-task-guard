@@ -8,6 +8,8 @@ import {
   buildResumeAutomationIntent,
   ensureResumeAutomation,
   reconcileLocalAutomationRegistry,
+  verifyAutomationTranscript,
+  verifyPersistedAutomation,
 } from "../scripts/lib/automation.mjs";
 
 function intent() {
@@ -34,6 +36,17 @@ function persistedHeartbeat(overrides = {}) {
   };
 }
 
+test("logical current-thread intent cannot masquerade as a concrete target ID", () => {
+  assert.throws(
+    () => buildResumeAutomationIntent({
+      taskId: "TASK-0010",
+      targetThread: "current",
+      resumeAfter: "2026-08-31T17:32:11.000Z",
+    }),
+    /concrete runtime thread ID/,
+  );
+});
+
 test("create ID and matching view read-back verifies a same-thread heartbeat", async () => {
   const expected = intent();
 
@@ -52,6 +65,7 @@ test("create ID and matching view read-back verifies a same-thread heartbeat", a
   assert.equal(result.attempts, 1);
   assert.deepEqual(result.verification, {
     persisted: true,
+    id_match: true,
     identity_match: true,
     kind_match: true,
     thread_match: true,
@@ -59,6 +73,66 @@ test("create ID and matching view read-back verifies a same-thread heartbeat", a
     status_active: true,
     prompt_match: true,
   });
+});
+
+test("read-back requires the requested automation ID", () => {
+  const expected = intent();
+  const matching = verifyPersistedAutomation(
+    persistedHeartbeat({ id: "automation-123" }),
+    expected,
+    "automation-123",
+  );
+  const wrong = verifyPersistedAutomation(
+    persistedHeartbeat({ id: "automation-other" }),
+    expected,
+    "automation-123",
+  );
+  const missing = verifyPersistedAutomation(
+    persistedHeartbeat({ id: undefined }),
+    expected,
+    "automation-123",
+  );
+
+  assert.equal(matching.verified, true);
+  assert.equal(matching.verification.id_match, true);
+  assert.equal(wrong.verified, false);
+  assert.equal(wrong.reason, "ID_MISMATCH");
+  assert.equal(wrong.verification.id_match, false);
+  assert.equal(missing.verified, false);
+  assert.equal(missing.reason, "ID_UNVERIFIED");
+  assert.equal(missing.verification.id_match, null);
+});
+
+for (const [label, rrule] of [
+  ["daily without a count", "DTSTART:20260831T173211Z\nRRULE:FREQ=DAILY"],
+  ["hourly recurrence", "DTSTART:20260831T173211Z\nRRULE:FREQ=HOURLY"],
+  ["weekly recurrence", "DTSTART:20260831T173211Z\nRRULE:FREQ=WEEKLY"],
+  ["a count greater than one", "DTSTART:20260831T173211Z\nRRULE:FREQ=DAILY;COUNT=2"],
+  ["a second unbounded recurrence", "DTSTART:20260831T173211Z\nRRULE:FREQ=DAILY;COUNT=1\nRRULE:FREQ=HOURLY"],
+  ["a wake before reset", "DTSTART:20260831T173210Z\nRRULE:FREQ=DAILY;COUNT=1"],
+  ["a wake over five minutes late", "DTSTART:20260831T173712Z\nRRULE:FREQ=DAILY;COUNT=1"],
+]) {
+  test(`${label} is not a valid one-shot quota wake`, () => {
+    const checked = verifyPersistedAutomation(
+      persistedHeartbeat({ rrule }),
+      intent(),
+      "automation-123",
+    );
+    assert.equal(checked.verified, false);
+    assert.equal(checked.verification.schedule_match, false);
+  });
+}
+
+test("a single-occurrence schedule inside the five-minute window is accepted", () => {
+  const checked = verifyPersistedAutomation(
+    persistedHeartbeat({
+      rrule: "DTSTART:20260831T173411Z\nRRULE:FREQ=DAILY;COUNT=1",
+    }),
+    intent(),
+    "automation-123",
+  );
+  assert.equal(checked.verified, true);
+  assert.equal(checked.verification.schedule_match, true);
 });
 
 test("a rendered automation card without an ID is never verified", async () => {
@@ -375,4 +449,155 @@ test("a persisted heartbeat with no readable target is not same-thread verified"
   assert.equal(result.status, "FAILED");
   assert.equal(result.last_error, "TARGET_UNVERIFIED");
   assert.equal(result.verification.thread_match, null);
+});
+
+test("repeated unparseable views stay ambiguous and never trigger a second create", async () => {
+  let createCalls = 0;
+  let reconcileCalls = 0;
+  const result = await ensureResumeAutomation({
+    expected: intent(),
+    maxViewAttempts: 2,
+    adapter: {
+      create: async () => ({ automation_id: `automation-${++createCalls}` }),
+      view: async () => ({ content: [{ type: "text", text: "Rendered a detail card" }] }),
+      reconcile: async () => {
+        reconcileCalls += 1;
+        return { outcome: "ABSENT", candidates: [] };
+      },
+    },
+    delay: async () => {},
+  });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.last_error, "UNPARSEABLE_VIEW");
+  assert.equal(createCalls, 1);
+  assert.equal(reconcileCalls, 1);
+});
+
+test("transient view failures are bounded and never authorize a blind recreate", async () => {
+  let createCalls = 0;
+  let viewCalls = 0;
+  const result = await ensureResumeAutomation({
+    expected: intent(),
+    maxViewAttempts: 2,
+    adapter: {
+      create: async () => ({ automation_id: `automation-${++createCalls}` }),
+      view: async () => {
+        viewCalls += 1;
+        const error = new Error("request timeout");
+        error.code = "ETIMEDOUT";
+        throw error;
+      },
+      reconcile: async () => ({ outcome: "ABSENT", candidates: [] }),
+    },
+    delay: async () => {},
+  });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.last_error, "VIEW_TRANSIENT_FAILURE");
+  assert.equal(createCalls, 1);
+  assert.equal(viewCalls, 2);
+});
+
+test("a structural view rejection returns manual fallback without reconciliation", async () => {
+  let reconcileCalls = 0;
+  const result = await ensureResumeAutomation({
+    expected: intent(),
+    adapter: {
+      create: async () => ({ automation_id: "automation-123" }),
+      view: async () => {
+        throw new Error("handler missing for mode view");
+      },
+      reconcile: async () => {
+        reconcileCalls += 1;
+        return { outcome: "ABSENT", candidates: [] };
+      },
+    },
+    delay: async () => {},
+  });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.last_error, "STRUCTURAL_FAILURE");
+  assert.equal(reconcileCalls, 0);
+});
+
+test("a reconciliation I/O error returns a structured manual result", async () => {
+  const result = await ensureResumeAutomation({
+    expected: intent(),
+    maxViewAttempts: 1,
+    adapter: {
+      create: async () => ({ automation_id: "automation-123" }),
+      view: async () => {
+        throw new Error("NOT_FOUND");
+      },
+      reconcile: async () => {
+        const error = new Error("access denied");
+        error.code = "EACCES";
+        throw error;
+      },
+    },
+    delay: async () => {},
+  });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.last_error, "RECONCILIATION_FAILED");
+  assert.equal(result.attempts, 1);
+});
+
+test("an ambiguous create plus filesystem absence still does not recreate", async () => {
+  let createCalls = 0;
+  const result = await ensureResumeAutomation({
+    expected: intent(),
+    adapter: {
+      create: async () => {
+        createCalls += 1;
+        throw new Error("request timeout");
+      },
+      view: async () => persistedHeartbeat(),
+      reconcile: async () => ({ outcome: "ABSENT", candidates: [] }),
+    },
+    delay: async () => {},
+  });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.last_error, "AMBIGUOUS_CREATE");
+  assert.equal(createCalls, 1);
+});
+
+test("the Node transcript verifier derives VERIFIED from raw create and view evidence", async () => {
+  const result = await verifyAutomationTranscript({
+    expected: intent(),
+    transcript: {
+      operations: [
+        { operation: "create", result: { automation_id: "automation-123" } },
+        { operation: "view", id: "automation-123", result: persistedHeartbeat() },
+      ],
+    },
+    delay: async () => {},
+  });
+
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(result.verification_source, "READBACK");
+  assert.equal("operations" in result, false);
+});
+
+test("the Node transcript verifier rejects hand-authored VERIFIED booleans", async () => {
+  await assert.rejects(
+    verifyAutomationTranscript({
+      expected: intent(),
+      transcript: {
+        status: "VERIFIED",
+        verification: {
+          persisted: true,
+          id_match: true,
+          identity_match: true,
+          kind_match: true,
+          thread_match: true,
+          schedule_match: true,
+          status_active: true,
+        },
+      },
+    }),
+    /operations/i,
+  );
 });

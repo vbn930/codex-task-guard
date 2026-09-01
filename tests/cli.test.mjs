@@ -95,7 +95,7 @@ test("checkpoint heartbeat CLI patches and clears only the automation id", async
   assert.equal(JSON.parse(cleared.stdout).heartbeat_automation_id, null);
 });
 
-test("checkpoint automation CLI stores a verified sanitized result", async () => {
+test("checkpoint automation CLI rejects caller-authored VERIFIED state", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "task-guard-automation-cli-"));
   const project = path.join(root, "project");
   const home = path.join(root, "global");
@@ -116,12 +116,15 @@ test("checkpoint automation CLI stores a verified sanitized result", async () =>
     status: "VERIFIED",
     automation_id: "automation-cli",
     attempts: 1,
+    verified_at: "2026-08-31T13:00:00.000Z",
+    verification_source: "READBACK",
     target_thread: "thread-cli",
     resume_after: "2026-08-31T17:32:11.000Z",
     snapshot_id: "snapshot-cli",
     automation_fingerprint: "fingerprint-cli",
     verification: {
       persisted: true,
+      id_match: true,
       identity_match: true,
       kind_match: true,
       thread_match: true,
@@ -139,8 +142,8 @@ test("checkpoint automation CLI stores a verified sanitized result", async () =>
     "--task-id", "automation-cli-task", "--input", automationInput,
   ], { env });
 
-  assert.equal(patched.status, 0, patched.stderr);
-  assert.equal(JSON.parse(patched.stdout).resume_mode, "AUTOMATION");
+  assert.notEqual(patched.status, 0);
+  assert.match(JSON.parse(patched.stdout).error.message, /VERIFIED.*pause finalize|read-back/i);
 });
 
 test("pause finalize CLI patches the result before its final notification", async () => {
@@ -167,16 +170,11 @@ test("pause finalize CLI patches the result before its final notification", asyn
     thread_reference: "thread-final",
   }));
   await writeFile(finalInput, JSON.stringify({
-    resume_automation: {
-      purpose: "quota_resume",
-      status: "FAILED",
-      automation_id: null,
-      attempts: 2,
-      target_thread: "thread-final",
-      resume_after: resumeAfter,
-      snapshot_id: snapshotId,
-      last_error: "PERSISTENCE_NOT_VERIFIED",
-      resolution: "MANUAL_FALLBACK",
+    automation_transcript: {
+      operations: [{
+        operation: "create",
+        error: { code: "SCHEMA_UNSUPPORTED", message: "heartbeat schema unsupported" },
+      }],
     },
     notification: { project: "demo", task: "Finalize automation result" },
   }));
@@ -194,6 +192,53 @@ test("pause finalize CLI patches the result before its final notification", asyn
   const output = JSON.parse(finalized.stdout);
   assert.equal(output.resume_mode, "MANUAL");
   assert.equal(output.notification.reason, "DISABLED");
+});
+
+test("automation verify CLI emits only a sanitized read-back result", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "task-guard-verifier-cli-"));
+  const input = path.join(root, "verification.json");
+  await writeFile(input, JSON.stringify({
+    expected: {
+      task_id: "verify-cli-task",
+      purpose: "quota_resume",
+      target_thread: "thread-cli",
+      resume_after: "2026-08-31T17:32:11.000Z",
+      name: "verify-cli-task quota resume",
+      kind: "heartbeat",
+      destination: "thread",
+      status: "ACTIVE",
+      snapshot_id: "snapshot-cli",
+      prompt: "resume prompt",
+      automation_fingerprint: "fingerprint-cli",
+    },
+    transcript: {
+      operations: [
+        { operation: "create", result: { automation_id: "automation-cli" } },
+        {
+          operation: "view",
+          id: "automation-cli",
+          result: {
+            id: "automation-cli",
+            kind: "heartbeat",
+            status: "ACTIVE",
+            name: "verify-cli-task quota resume",
+            destination: "thread",
+            targetThreadId: "thread-cli",
+            rrule: "DTSTART:20260831T173211Z\nRRULE:FREQ=DAILY;COUNT=1",
+            prompt: "resume prompt",
+            private: "must-not-be-emitted",
+          },
+        },
+      ],
+    },
+  }));
+
+  const verified = run(["automation", "verify", "--input", input]);
+  assert.equal(verified.status, 0, verified.stderr);
+  const output = JSON.parse(verified.stdout);
+  assert.equal(output.status, "VERIFIED");
+  assert.equal(output.verification_source, "READBACK");
+  assert.doesNotMatch(verified.stdout, /must-not-be-emitted/);
 });
 
 test("notify command succeeds as a disabled optional feature", async () => {
@@ -340,6 +385,7 @@ test("pause prepare persists one refreshed snapshot for resume scheduling", asyn
       task_description: "Pause with one quota snapshot",
       status: "PAUSED_FOR_QUOTA",
       exact_next_actions: ["Resume tests"],
+      thread_reference: "thread-pause-cli",
     },
     notification: {
       project: "demo",

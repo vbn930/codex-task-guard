@@ -37,6 +37,9 @@ export function buildResumeAutomationIntent({
   if (!taskId || !targetThread || !resumeAfter) {
     throw new Error("taskId, targetThread, and resumeAfter are required");
   }
+  if (targetThread.trim().toLowerCase() === "current") {
+    throw new Error("targetThread must be a concrete runtime thread ID");
+  }
   if (Number.isNaN(Date.parse(resumeAfter))) throw new Error("resumeAfter must be an ISO timestamp");
   return {
     task_id: taskId,
@@ -110,7 +113,15 @@ function extractTimestamp(text) {
 
 function scheduleMatches(actual, expected) {
   if (typeof actual !== "string") return false;
-  if (/FREQ=DAILY/i.test(actual) && !/COUNT=1(?:;|$)/i.test(actual)) return false;
+  const recurrences = [...actual.matchAll(/(?:^|\n|\s)RRULE:([^\n]+)/gi)]
+    .map((match) => match[1]);
+  if (recurrences.length === 0 && /(?:^|;)FREQ=/i.test(actual)) {
+    recurrences.push(actual.slice(actual.search(/FREQ=/i)));
+  }
+  for (const recurrence of recurrences) {
+    const count = recurrence.match(/(?:^|;)COUNT=(\d+)(?:;|$)/i)?.[1];
+    if (count !== "1") return false;
+  }
   const actualTimestamp = extractTimestamp(actual);
   if (!actualTimestamp) return false;
   const delta = Date.parse(actualTimestamp) - Date.parse(expected.resume_after);
@@ -233,11 +244,14 @@ export function normalizeViewResult(raw) {
   };
 }
 
-export function verifyPersistedAutomation(raw, expected) {
+export function verifyPersistedAutomation(raw, expected, requestedId) {
   const actual = normalizeViewResult(raw);
   if (!actual.found) return { verified: false, reason: actual.reason, actual };
   const verification = {
     persisted: true,
+    id_match: actual.id === null
+      ? null
+      : actual.id === requestedId,
     identity_match: actual.name === expected.name,
     kind_match: actual.kind === "heartbeat",
     thread_match: actual.target_thread === null
@@ -255,29 +269,64 @@ export function verifyPersistedAutomation(raw, expected) {
   const verified = Object.entries(verification).every(([key, value]) => (
     key === "prompt_match" ? value !== false : value === true
   ));
-  return { verified, reason: verified ? null : "FIELD_MISMATCH", actual, verification };
+  const reason = verified
+    ? null
+    : verification.id_match === null
+      ? "ID_UNVERIFIED"
+      : verification.id_match === false
+        ? "ID_MISMATCH"
+        : "FIELD_MISMATCH";
+  return { verified, reason, actual, verification };
 }
 
 async function verifyById({ id, expected, adapter, maxViewAttempts, delay, trace }) {
+  let lastCheck = null;
   for (let attempt = 1; attempt <= maxViewAttempts; attempt += 1) {
     trace.push(RESUME_AUTOMATION_STATES.READBACK_VERIFYING);
     try {
       const raw = await adapter.view({ id, mode: "view" });
-      const checked = verifyPersistedAutomation(raw, expected);
+      const checked = verifyPersistedAutomation(raw, expected, id);
       if (checked.actual.found) {
         trace.push(RESUME_AUTOMATION_STATES.PERSISTED);
         if (checked.verified) trace.push(RESUME_AUTOMATION_STATES.VERIFIED);
         else trace.push(RESUME_AUTOMATION_STATES.MISMATCH);
         return checked;
       }
+      lastCheck = checked;
     } catch (error) {
-      if (!/not[ _-]?found/i.test(error?.message ?? "")) throw error;
+      const text = `${error?.code ?? ""} ${error?.message ?? ""}`;
+      if (isStructuralFailure(error)) {
+        return {
+          verified: false,
+          reason: "STRUCTURAL_FAILURE",
+          actual: { found: false },
+        };
+      }
+      if (/not[ _-]?found|ENOENT|404/i.test(text)) {
+        lastCheck = { verified: false, reason: "NOT_FOUND", actual: { found: false } };
+      } else if (/timeout|timedout|ECONNRESET|EAI_AGAIN|temporar|transport/i.test(text)) {
+        lastCheck = {
+          verified: false,
+          reason: "VIEW_TRANSIENT_FAILURE",
+          actual: { found: false },
+        };
+      } else {
+        lastCheck = {
+          verified: false,
+          reason: "AMBIGUOUS_VIEW_FAILURE",
+          actual: { found: false },
+        };
+      }
     }
     if (attempt < maxViewAttempts) {
       await delay(DEFAULT_VIEW_BACKOFF_MS[Math.min(attempt - 1, DEFAULT_VIEW_BACKOFF_MS.length - 1)]);
     }
   }
-  return { verified: false, reason: "NOT_FOUND", actual: { found: false } };
+  return lastCheck ?? {
+    verified: false,
+    reason: "UNPARSEABLE_VIEW",
+    actual: { found: false },
+  };
 }
 
 function verifiedResult({ id, attempts, expected, checked, trace }) {
@@ -292,6 +341,7 @@ function verifiedResult({ id, attempts, expected, checked, trace }) {
     resume_after: expected.resume_after,
     snapshot_id: expected.snapshot_id,
     automation_fingerprint: expected.automation_fingerprint,
+    verification_source: "READBACK",
     verification: checked.verification,
     state_trace: trace,
   };
@@ -300,6 +350,8 @@ function verifiedResult({ id, attempts, expected, checked, trace }) {
 function mismatchReason(checked) {
   const verification = checked?.verification;
   if (!verification) return checked?.reason ?? "PERSISTENCE_NOT_VERIFIED";
+  if (verification.id_match === null) return "ID_UNVERIFIED";
+  if (!verification.id_match) return "ID_MISMATCH";
   if (!verification.identity_match) return "IDENTITY_MISMATCH";
   if (!verification.kind_match) return "KIND_MISMATCH";
   if (verification.thread_match === null) return "TARGET_UNVERIFIED";
@@ -313,6 +365,16 @@ function mismatchReason(checked) {
 function isStructuralFailure(error) {
   return /tool unavailable|handler missing|non[- ]local|schema unsupported|schema rejection|permission|capability|heartbeat unsupported/i
     .test(error?.message ?? "");
+}
+
+async function reconcileSafely(adapter, expected, trace) {
+  if (typeof adapter.reconcile !== "function") return { outcome: "UNAVAILABLE" };
+  trace.push(RESUME_AUTOMATION_STATES.RECONCILING);
+  try {
+    return await adapter.reconcile(expected);
+  } catch {
+    return { outcome: "ERROR", reason: "RECONCILIATION_FAILED" };
+  }
 }
 
 export async function ensureResumeAutomation({
@@ -349,9 +411,14 @@ export async function ensureResumeAutomation({
       trace.push(parsed.outcome === "UI_RENDERED"
         ? RESUME_AUTOMATION_STATES.UI_RENDERED
         : RESUME_AUTOMATION_STATES.RECONCILING);
-      if (typeof adapter.reconcile !== "function") break;
-      trace.push(RESUME_AUTOMATION_STATES.RECONCILING);
-      const reconciliation = await adapter.reconcile(expected);
+      terminalError = parsed.outcome === "UI_RENDERED"
+        ? "UI_RENDERED_NOT_PERSISTED"
+        : "AMBIGUOUS_CREATE";
+      const reconciliation = await reconcileSafely(adapter, expected, trace);
+      if (reconciliation.outcome === "ERROR") {
+        terminalError = reconciliation.reason;
+        break;
+      }
       if (reconciliation?.outcome === "SINGLE" && reconciliation.automation_id) {
         lastAutomationId = reconciliation.automation_id;
         const checked = await verifyById({
@@ -373,10 +440,6 @@ export async function ensureResumeAutomation({
         }
         lastCheck = checked;
         break;
-      }
-      if (reconciliation?.outcome === "ABSENT" && attempts < maxCreateAttempts) {
-        trace.push(RESUME_AUTOMATION_STATES.RETRYING);
-        continue;
       }
       break;
     }
@@ -400,9 +463,16 @@ export async function ensureResumeAutomation({
       });
     }
     lastCheck = checked;
+    if (checked.reason === "STRUCTURAL_FAILURE") {
+      terminalError = "STRUCTURAL_FAILURE";
+      break;
+    }
     if (checked.reason === "NOT_FOUND" && typeof adapter.reconcile === "function") {
-      trace.push(RESUME_AUTOMATION_STATES.RECONCILING);
-      const reconciliation = await adapter.reconcile(expected);
+      const reconciliation = await reconcileSafely(adapter, expected, trace);
+      if (reconciliation.outcome === "ERROR") {
+        terminalError = reconciliation.reason;
+        break;
+      }
       if (reconciliation?.outcome === "SINGLE" && reconciliation.automation_id) {
         lastAutomationId = reconciliation.automation_id;
         const reconciled = await verifyById({
@@ -429,6 +499,13 @@ export async function ensureResumeAutomation({
         trace.push(RESUME_AUTOMATION_STATES.RETRYING);
         continue;
       }
+    } else if ([
+      "UNPARSEABLE_VIEW",
+      "VIEW_TRANSIENT_FAILURE",
+      "AMBIGUOUS_VIEW_FAILURE",
+    ].includes(checked.reason)) {
+      const reconciliation = await reconcileSafely(adapter, expected, trace);
+      if (reconciliation.outcome === "ERROR") terminalError = reconciliation.reason;
     }
     break;
   }
@@ -449,4 +526,57 @@ export async function ensureResumeAutomation({
     ...(lastCheck?.verification ? { verification: lastCheck.verification } : {}),
     state_trace: trace,
   };
+}
+
+function transcriptError(operation) {
+  const descriptor = operation?.error;
+  if (!descriptor || typeof descriptor !== "object") return null;
+  const error = new Error(
+    typeof descriptor.message === "string" ? descriptor.message : "automation operation failed",
+  );
+  if (typeof descriptor.code === "string") error.code = descriptor.code;
+  return error;
+}
+
+export async function verifyAutomationTranscript({
+  expected,
+  transcript,
+  delay,
+  maxCreateAttempts = DEFAULT_MAX_CREATE_ATTEMPTS,
+  maxViewAttempts = DEFAULT_MAX_VIEW_ATTEMPTS,
+}) {
+  if (!Array.isArray(transcript?.operations) || transcript.operations.length === 0) {
+    throw new Error("automation verification transcript operations are required");
+  }
+  const operations = [...transcript.operations];
+  const take = (kind) => {
+    const operation = operations.shift();
+    if (operation?.operation !== kind) {
+      throw new Error(`automation transcript expected ${kind} operation`);
+    }
+    const error = transcriptError(operation);
+    if (error) throw error;
+    return operation;
+  };
+  const result = await ensureResumeAutomation({
+    expected,
+    maxCreateAttempts: Math.min(DEFAULT_MAX_CREATE_ATTEMPTS, maxCreateAttempts),
+    maxViewAttempts: Math.min(DEFAULT_MAX_VIEW_ATTEMPTS, maxViewAttempts),
+    delay,
+    adapter: {
+      create: async () => take("create").result,
+      view: async ({ id }) => {
+        const operation = take("view");
+        if (operation.id !== id) {
+          throw new Error("automation transcript view ID does not match the requested ID");
+        }
+        return operation.result;
+      },
+      reconcile: async () => take("reconcile").result,
+    },
+  });
+  if (operations.length > 0) {
+    throw new Error("automation transcript contains unused operations");
+  }
+  return result;
 }

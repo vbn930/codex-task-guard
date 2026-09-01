@@ -21,16 +21,28 @@ Re-verified on 2026-08-31 before implementing resume-automation recovery:
 - `%USERPROFILE%\.codex\automations` existed but contained no automation directories. No existing ID was available for a safe read-only `view` probe.
 - A live test automation was deliberately not created because it would mutate the user's scheduler. Create, view, not-found, UI-card-only, and persisted heartbeat response variants are covered through the agent adapter's deterministic fixtures instead.
 
+The exposed tool schema in this task supports these known arms only:
+
+- `{ id, mode: "view" }`
+- cron `{ mode: "create" | "suggested_create", executionEnvironment: "local", ... }`
+- heartbeat `{ mode: "create" | "suggested_create", destination?: "local" | "thread", targetThreadId?: unknown, ... }`
+
+There is no list or search mode. Exact update/delete payloads remain opaque and are not used for correctness. During the real quota-pause lifecycle check, an immediate heartbeat create carrying `DTSTART` was rejected because immediate create does not accept `DTSTART`; `suggested_create` returned only `Rendered automation card in the app.` with no ID. A read-only inspection of `%USERPROFILE%\.codex\automations` found no matching persisted entry. Task Guard therefore recorded manual fallback and did not claim that the rendered card was scheduled. Because no ID existed, a live `view` shape or not-found response could not be safely obtained; those shapes remain fixture-backed runtime assumptions.
+
 The local automation directory is treated only as a read-only, Windows-specific reconciliation aid after an ambiguous ID-less create result. It is not a public API, it is never edited, and a filesystem match alone cannot produce `VERIFIED`.
 
 ## Verification design derived from the probe
 
 - The Node utility owns the expected logical identity, response normalization, field comparison, bounded retry policy, reconciliation, sanitized checkpoint state, and Discord rendering. The Codex agent remains the adapter that invokes the exposed automation tool.
 - Create responses are classified as ID received, UI rendered only, ambiguous, or structural failure. IDs are accepted only from explicit ID fields/text; no synthetic ID is generated.
-- ID-based views are normalized from structured objects or conservative labeled text. Verification requires matching logical name, heartbeat kind, active status, target thread, reset/wake semantics, and prompt when available.
-- View persistence gets at most three short reads. Create gets at most two attempts. An ambiguous create always reconciles before any retry; a persisted mismatch never triggers blind recreation because safe update/delete payloads were not established.
-- A one-shot schedule represented as `DTSTART` plus `FREQ=DAILY;COUNT=1` is accepted when its first wake is at or within five minutes after the verified reset. An unbounded daily recurrence is rejected as `SCHEDULE_MISMATCH`.
+- ID-based views are normalized from structured objects or conservative labeled text. Verification requires the requested and persisted IDs to match, plus logical name, heartbeat kind, active status, concrete target thread, reset/wake semantics, and prompt when available. Missing IDs/targets remain unverified; the logical word `current` is never invented as a concrete runtime ID.
+- View persistence gets at most three short reads. Create gets at most two attempts. Only repeated explicit `NOT_FOUND` followed by read-only reconciliation `ABSENT` can authorize a second create. Unparseable, transient transport, structural, reconciliation-I/O, and ambiguous results end in structured manual fallback.
+- A one-shot schedule represented as `DTSTART` plus `FREQ=DAILY;COUNT=1` is accepted when its first wake is at or within five minutes after the verified reset. Any RRULE without `COUNT=1`, or with `COUNT > 1`, can repeat and is rejected regardless of hourly/daily/weekly frequency.
+- The production boundary accepts an ordered raw operation transcript over stdin. Node derives the sanitized result, and pause finalization re-runs the verifier. The direct checkpoint automation command cannot author `VERIFIED`; raw responses are never checkpoint or registry fields.
+- The project checkpoint is authoritative. A registry failure after a narrow checkpoint write is explicit, recoverable derived-state drift; registry repair reads the checkpoint and never replays automation creation.
 - `VERIFIED` means persistence and readable-field verification only. Scheduler execution remains a separate future event and is not guaranteed.
+
+`PERSISTENCE VERIFIED != FUTURE EXECUTION GUARANTEED`.
 
 ## Runtime decision
 

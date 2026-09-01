@@ -7,7 +7,10 @@ import {
   saveCheckpoint,
   verifyCheckpoint,
 } from "./checkpoint.mjs";
-import { buildResumeAutomationIntent } from "./automation.mjs";
+import {
+  buildResumeAutomationIntent,
+  verifyAutomationTranscript,
+} from "./automation.mjs";
 import { notifyDiscord } from "./discord.mjs";
 import {
   unavailableQuotaSnapshot,
@@ -20,6 +23,14 @@ import {
   readUsageHistory,
   startPhase,
 } from "./usage.mjs";
+
+function sameThreadResumePrompt() {
+  return [
+    "Resume this same Codex task after the verified quota reset.",
+    "Recheck quota, run Task Guard resume prepare for the existing checkpoint, then continue the exact next action.",
+    "Do not create a new task.",
+  ].join(" ");
+}
 
 export async function preparePhase({
   projectPath,
@@ -74,7 +85,62 @@ export async function prepareTaskResume({
   if (state.task_id !== taskId) {
     throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
   }
+  if (state.status?.toUpperCase() === "WORKING") {
+    return {
+      status: "ALREADY_RESUMED",
+      snapshot,
+      verification: null,
+      heartbeat_cleanup: {
+        required: false,
+        completed: true,
+        reason: "ALREADY_RESUMED",
+      },
+      resume: null,
+      notification: null,
+    };
+  }
+  if (state.status?.toUpperCase() !== "PAUSED_FOR_QUOTA") {
+    return {
+      status: "TASK_BLOCKED",
+      snapshot,
+      verification: { matches: false, reason: "INVALID_RESUME_STATE" },
+      heartbeat_cleanup: { required: false, completed: false },
+      resume: null,
+      notification: null,
+    };
+  }
   const verification = await verifyCheckpoint(checkpointPath);
+  if (!verification.matches) {
+    const notification = await notifyDiscord(
+      "TASK_BLOCKED",
+      {
+        ...blockedNotificationPayload,
+        reason: blockedNotificationPayload?.reason ?? "Task resume verification failed",
+        detected: blockedNotificationPayload?.detected ?? verification.reason,
+        action_required: blockedNotificationPayload?.action_required
+          ?? "Resolve the blocked resume condition before continuing",
+        checkpoint: blockedNotificationPayload?.checkpoint ?? "Preserved",
+        status: blockedNotificationPayload?.status ?? "Blocked",
+      },
+      notifyOptions,
+    );
+    return {
+      status: "TASK_BLOCKED",
+      snapshot,
+      verification,
+      heartbeat_cleanup: { required: false, completed: false },
+      resume: null,
+      notification,
+    };
+  }
+  const decision = phases
+    ? evaluateBudget({
+      history: await readUsageHistory({ taskGuardHome }),
+      phases,
+      snapshot,
+      safetyReservePercent,
+    })
+    : null;
   let heartbeatCleanup = { required: false, completed: true };
   if (state.heartbeat_automation_id) {
     heartbeatCleanup = {
@@ -102,10 +168,8 @@ export async function prepareTaskResume({
     }
   }
 
-  if (!verification.matches || !heartbeatCleanup.completed) {
-    const reason = !verification.matches
-      ? verification.reason
-      : heartbeatCleanup.reason;
+  if (!heartbeatCleanup.completed) {
+    const reason = heartbeatCleanup.reason;
     const notification = await notifyDiscord(
       "TASK_BLOCKED",
       {
@@ -146,14 +210,6 @@ export async function prepareTaskResume({
     },
     { ...notifyOptions, snapshot },
   );
-  const decision = phases
-    ? evaluateBudget({
-      history: await readUsageHistory({ taskGuardHome }),
-      phases,
-      snapshot,
-      safetyReservePercent,
-    })
-    : null;
   return {
     status: "TASK_RESUMED",
     snapshot,
@@ -238,18 +294,21 @@ export async function prepareQuotaPause({
   }
   const hasVerifiedReset = automationScheduleError === null;
   const resumeAfter = hasVerifiedReset ? snapshot.five_hour.reset_at : null;
-  const targetThread = checkpointState.thread_reference ?? "current";
-  const automationIntent = hasVerifiedReset
+  const targetThread = checkpointState.thread_reference ?? null;
+  const hasConcreteThread = typeof targetThread === "string"
+    && targetThread.trim() !== ""
+    && targetThread.toLowerCase() !== "current";
+  if (hasVerifiedReset && !hasConcreteThread) {
+    automationScheduleError = "CONCRETE_THREAD_ID_REQUIRED";
+  }
+  const automationEligible = hasVerifiedReset && hasConcreteThread;
+  const automationIntent = automationEligible
     ? buildResumeAutomationIntent({
       taskId: checkpointState.task_id,
       targetThread,
       resumeAfter,
       snapshotId: snapshot.snapshot_id,
-      prompt: [
-        "Resume this same Codex task after the verified quota reset.",
-        "Recheck quota, run Task Guard resume prepare for the existing checkpoint, then continue the exact next action.",
-        "Do not create a new task.",
-      ].join(" "),
+      prompt: sameThreadResumePrompt(),
     })
     : null;
 
@@ -265,8 +324,8 @@ export async function prepareQuotaPause({
     },
     resume_after: resumeAfter,
     thread_reference: targetThread,
-    resume_mode: hasVerifiedReset ? "AUTOMATION_ELIGIBLE" : "MANUAL",
-    resume_automation: hasVerifiedReset ? {
+    resume_mode: automationEligible ? "AUTOMATION_ELIGIBLE" : "MANUAL",
+    resume_automation: automationEligible ? {
       purpose: "quota_resume",
       status: "ELIGIBLE",
       automation_id: null,
@@ -286,7 +345,7 @@ export async function prepareQuotaPause({
   };
   const savedCheckpoint = await saveCheckpoint({ projectPath, state, taskGuardHome });
   const checkpoint = { ...savedCheckpoint, saved: true };
-  const notification = hasVerifiedReset ? null : await notifyDiscord(
+  const notification = automationEligible ? null : await notifyDiscord(
     "QUOTA_PAUSED",
     {
       ...notificationPayload,
@@ -302,20 +361,20 @@ export async function prepareQuotaPause({
     checkpoint,
     notification,
     automation_intent: automationIntent,
-    automation_schedule: hasVerifiedReset ? {
+    automation_schedule: automationEligible ? {
       resume_after: resumeAfter,
       quota_snapshot_id: snapshot.snapshot_id,
       quota_observed_at: snapshot.observed_at,
     } : null,
     automation_schedule_error: automationScheduleError,
-    resume_mode: hasVerifiedReset ? "AUTOMATION_ELIGIBLE" : "MANUAL",
+    resume_mode: automationEligible ? "AUTOMATION_ELIGIBLE" : "MANUAL",
   };
 }
 
 export async function finalizeQuotaPause({
   projectPath,
   taskId,
-  resumeAutomation,
+  automationTranscript,
   notificationPayload,
   taskGuardHome,
   notifyOptions,
@@ -325,11 +384,32 @@ export async function finalizeQuotaPause({
   if (state.task_id !== taskId) {
     throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
   }
+  if (state.status !== "PAUSED_FOR_QUOTA") {
+    throw new Error("Quota pause can only be finalized from PAUSED_FOR_QUOTA");
+  }
+  const expected = buildResumeAutomationIntent({
+    taskId: state.task_id,
+    targetThread: state.thread_reference,
+    resumeAfter: state.resume_after,
+    snapshotId: state.quota_snapshot?.snapshot_id,
+    prompt: sameThreadResumePrompt(),
+  });
+  if (
+    state.resume_automation?.automation_fingerprint
+    && state.resume_automation.automation_fingerprint !== expected.automation_fingerprint
+  ) {
+    throw new Error("Checkpoint automation fingerprint does not match the expected intent");
+  }
+  const resumeAutomation = await verifyAutomationTranscript({
+    expected,
+    transcript: automationTranscript,
+  });
   const checkpoint = await patchCheckpointResumeAutomation({
     projectPath,
     taskId,
     resumeAutomation,
     taskGuardHome,
+    allowVerified: true,
   });
   const finalizedAutomation = checkpoint.resume_automation;
   const verified = finalizedAutomation.status === "VERIFIED";

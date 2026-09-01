@@ -6,6 +6,7 @@ import {
   completeTask,
   patchCheckpointResumeAutomation,
   readCheckpoint,
+  repairCheckpointRegistry,
   resolveCheckpointPath,
   resumeTask,
   saveCheckpoint,
@@ -29,6 +30,7 @@ import {
   readUsageHistory,
   startPhase,
 } from "./lib/usage.mjs";
+import { verifyAutomationTranscript } from "./lib/automation.mjs";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
@@ -90,12 +92,13 @@ async function checkpointCommand(args) {
       "--input",
       { required: true },
     ));
-    printJson(await patchCheckpointResumeAutomation({
+    const result = await patchCheckpointResumeAutomation({
       projectPath: optionValue(automationOptions, "--project") ?? process.cwd(),
       taskId: optionValue(automationOptions, "--task-id", { required: true }),
       resumeAutomation,
-    }));
-    return 0;
+    });
+    printJson(result);
+    return result.recovery_required ? 4 : 0;
   }
   if (action === "heartbeat") {
     const [heartbeatAction, ...heartbeatOptions] = options;
@@ -104,17 +107,28 @@ async function checkpointCommand(args) {
       taskId: optionValue(heartbeatOptions, "--task-id", { required: true }),
     };
     if (heartbeatAction === "set") {
-      printJson(await setCheckpointHeartbeat({
+      const result = await setCheckpointHeartbeat({
         ...common,
         automationId: optionValue(heartbeatOptions, "--automation-id", { required: true }),
-      }));
-      return 0;
+      });
+      printJson(result);
+      return result.recovery_required ? 4 : 0;
     }
     if (heartbeatAction === "clear") {
-      printJson(await clearCheckpointHeartbeat(common));
-      return 0;
+      const result = await clearCheckpointHeartbeat(common);
+      printJson(result);
+      return result.recovery_required ? 4 : 0;
     }
     throw new Error("checkpoint heartbeat action must be set or clear");
+  }
+  if (action === "registry") {
+    const [registryAction, ...registryOptions] = options;
+    if (registryAction !== "repair") throw new Error("checkpoint registry action must be repair");
+    printJson(await repairCheckpointRegistry({
+      projectPath: optionValue(registryOptions, "--project") ?? process.cwd(),
+      taskId: optionValue(registryOptions, "--task-id", { required: true }),
+    }));
+    return 0;
   }
   if (action === "save") {
     const projectPath = optionValue(options, "--project") ?? process.cwd();
@@ -147,7 +161,9 @@ async function checkpointCommand(args) {
     printJson(await completeTask({ projectPath, taskId }));
     return 0;
   }
-  throw new Error("checkpoint action must be heartbeat, save, show, verify, list, resume, or complete");
+  throw new Error(
+    "checkpoint action must be automation, heartbeat, registry, save, show, verify, list, resume, or complete",
+  );
 }
 
 async function notifyCommand(args) {
@@ -266,13 +282,14 @@ async function pauseCommand(args) {
   const projectPath = optionValue(options, "--project") ?? process.cwd();
   const input = await readJsonInput(optionValue(options, "--input", { required: true }));
   if (action === "finalize") {
-    printJson(await finalizeQuotaPause({
+    const result = await finalizeQuotaPause({
       projectPath,
       taskId: optionValue(options, "--task-id", { required: true }),
-      resumeAutomation: input.resume_automation,
+      automationTranscript: input.automation_transcript,
       notificationPayload: input.notification,
-    }));
-    return 0;
+    });
+    printJson(result);
+    return result.checkpoint.recovery_required ? 4 : 0;
   }
   if (action !== "prepare") throw new Error("pause action must be prepare or finalize");
   printJson(await prepareQuotaPause({
@@ -280,6 +297,17 @@ async function pauseCommand(args) {
     checkpointState: input.checkpoint,
     notificationPayload: input.notification,
     snapshotStore: currentQuotaStore(),
+  }));
+  return 0;
+}
+
+async function automationCommand(args) {
+  const [action, ...options] = args;
+  if (action !== "verify") throw new Error("automation action must be verify");
+  const input = await readJsonInput(optionValue(options, "--input", { required: true }));
+  printJson(await verifyAutomationTranscript({
+    expected: input.expected,
+    transcript: input.transcript,
   }));
   return 0;
 }
@@ -307,12 +335,13 @@ async function resumeCommand(args) {
 }
 
 function printHelp() {
-  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  doctor [--project PATH]\n  phase prepare --project PATH --input FILE| -\n  phase start --project PATH --input FILE| -\n  phase complete --project PATH --phase-id ID [--concurrent-usage true|false|unknown]\n  phase finish --project PATH --phase-id ID --input FILE| -\n  history list [--limit N]\n  budget evaluate --input FILE| -\n  pause prepare --project PATH --input FILE| -\n  pause finalize --project PATH --task-id ID --input FILE| -\n  resume prepare --project PATH --task-id ID --input FILE| -\n  checkpoint automation set --project PATH --task-id ID --input FILE| -\n  checkpoint heartbeat set --project PATH --task-id ID --automation-id ID\n  checkpoint heartbeat clear --project PATH --task-id ID\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint resume --project PATH --task-id ID\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
+  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  doctor [--project PATH]\n  automation verify --input FILE| -\n  phase prepare --project PATH --input FILE| -\n  phase start --project PATH --input FILE| -\n  phase complete --project PATH --phase-id ID [--concurrent-usage true|false|unknown]\n  phase finish --project PATH --phase-id ID --input FILE| -\n  history list [--limit N]\n  budget evaluate --input FILE| -\n  pause prepare --project PATH --input FILE| -\n  pause finalize --project PATH --task-id ID --input FILE| -\n  resume prepare --project PATH --task-id ID --input FILE| -\n  checkpoint automation set --project PATH --task-id ID --input FILE| -\n  checkpoint heartbeat set --project PATH --task-id ID --automation-id ID\n  checkpoint heartbeat clear --project PATH --task-id ID\n  checkpoint registry repair --project PATH --task-id ID\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint resume --project PATH --task-id ID\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
 }
 
 export async function main(argv = process.argv.slice(2)) {
   const [command] = argv;
   if (command === "quota") return quotaCommand();
+  if (command === "automation") return automationCommand(argv.slice(1));
   if (command === "doctor") return doctorCommand(argv.slice(1));
   if (command === "phase") return phaseCommand(argv.slice(1));
   if (command === "history") return historyCommand(argv.slice(1));

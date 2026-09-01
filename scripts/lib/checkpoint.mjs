@@ -363,12 +363,14 @@ async function patchCheckpointHeartbeat({
   taskId,
   automationId,
   taskGuardHome = defaultTaskGuardHome(),
+  registryWriter = writeRegistry,
 }) {
   const rootBuffer = await git(path.resolve(projectPath), ["rev-parse", "--show-toplevel"]);
   const root = path.resolve(rootBuffer.toString("utf8").trim());
   const checkpointPath = path.join(root, CHECKPOINT_RELATIVE_PATH);
   const now = new Date().toISOString();
   let heartbeatAutomationId = null;
+  let registryError = null;
 
   await withRegistryLock(taskGuardHome, async () => {
     const state = await readCheckpoint(checkpointPath);
@@ -391,13 +393,23 @@ async function patchCheckpointHeartbeat({
     if (automationId === null) delete patchedRegistryEntry.heartbeat_automation_id;
     else patchedRegistryEntry.heartbeat_automation_id = automationId;
     registry.tasks[key] = patchedRegistryEntry;
-    await writeRegistry(taskGuardHome, registry);
+    try {
+      await registryWriter(taskGuardHome, registry);
+    } catch {
+      registryError = {
+        code: "REGISTRY_UPDATE_FAILED",
+        message: "Checkpoint updated; derived registry repair is required",
+      };
+    }
     heartbeatAutomationId = patchedState.heartbeat_automation_id ?? null;
   });
 
   return {
     checkpoint_path: checkpointPath,
-    registry_updated: true,
+    checkpoint_updated: true,
+    registry_updated: registryError === null,
+    recovery_required: registryError !== null,
+    ...(registryError ? { error: registryError } : {}),
     heartbeat_automation_id: heartbeatAutomationId,
   };
 }
@@ -430,6 +442,7 @@ const AUTOMATION_STATUSES = new Set([
 ]);
 const VERIFICATION_KEYS = [
   "persisted",
+  "id_match",
   "identity_match",
   "kind_match",
   "thread_match",
@@ -437,6 +450,12 @@ const VERIFICATION_KEYS = [
   "status_active",
   "prompt_match",
 ];
+const TERMINAL_AUTOMATION_STATUSES = new Set([
+  "VERIFIED",
+  "FAILED",
+  "MANUAL_FALLBACK",
+  "EXECUTED",
+]);
 
 function sanitizeResumeAutomation(input) {
   if (!input || typeof input !== "object") throw new Error("resumeAutomation is required");
@@ -450,6 +469,7 @@ function sanitizeResumeAutomation(input) {
   };
   for (const key of [
     "verified_at",
+    "verification_source",
     "target_thread",
     "resume_after",
     "snapshot_id",
@@ -472,11 +492,17 @@ function sanitizeResumeAutomation(input) {
   }
   if (output.status === "VERIFIED") {
     if (!output.automation_id) throw new Error("VERIFIED resume automation requires automation_id");
+    if (output.attempts < 1) throw new Error("VERIFIED resume automation requires attempts >= 1");
+    if (!output.verified_at) throw new Error("VERIFIED resume automation requires verified_at");
+    if (output.verification_source !== "READBACK") {
+      throw new Error("VERIFIED resume automation requires READBACK verification_source");
+    }
     for (const key of ["target_thread", "resume_after", "snapshot_id", "automation_fingerprint"]) {
       if (!output[key]) throw new Error(`VERIFIED resume automation requires ${key}`);
     }
     const critical = [
       "persisted",
+      "id_match",
       "identity_match",
       "kind_match",
       "thread_match",
@@ -498,17 +524,29 @@ export async function patchCheckpointResumeAutomation({
   taskId,
   resumeAutomation,
   taskGuardHome = defaultTaskGuardHome(),
+  allowVerified = false,
+  registryWriter = writeRegistry,
 }) {
   const rootBuffer = await git(path.resolve(projectPath), ["rev-parse", "--show-toplevel"]);
   const root = path.resolve(rootBuffer.toString("utf8").trim());
   const checkpointPath = path.join(root, CHECKPOINT_RELATIVE_PATH);
   const automation = sanitizeResumeAutomation(resumeAutomation);
+  if (automation.status === "VERIFIED" && !allowVerified) {
+    throw new Error("VERIFIED automation must be derived by pause finalize read-back verification");
+  }
   const now = new Date().toISOString();
+  let registryError = null;
 
   await withRegistryLock(taskGuardHome, async () => {
     const state = await readCheckpoint(checkpointPath);
     if (state.task_id !== taskId) {
       throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
+    }
+    if (state.status?.toUpperCase() !== "PAUSED_FOR_QUOTA") {
+      throw new Error("resumeAutomation can only be finalized from PAUSED_FOR_QUOTA");
+    }
+    if (TERMINAL_AUTOMATION_STATUSES.has(state.resume_automation?.status)) {
+      throw new Error("Cannot rewrite a terminal automation state");
     }
     if (automation.snapshot_id && automation.snapshot_id !== state.quota_snapshot?.snapshot_id) {
       throw new Error("resumeAutomation snapshot_id does not match the checkpoint");
@@ -524,11 +562,20 @@ export async function patchCheckpointResumeAutomation({
       throw new Error("resumeAutomation fingerprint does not match the checkpoint intent");
     }
     if (
+      automation.status === "VERIFIED"
+      && state.resume_automation?.automation_fingerprint !== automation.automation_fingerprint
+    ) {
+      throw new Error("VERIFIED resumeAutomation requires the checkpoint intent fingerprint");
+    }
+    if (
       automation.target_thread
       && state.thread_reference
       && automation.target_thread !== state.thread_reference
     ) {
       throw new Error("resumeAutomation target_thread does not match the checkpoint");
+    }
+    if (automation.status === "VERIFIED" && automation.target_thread !== state.thread_reference) {
+      throw new Error("VERIFIED resumeAutomation requires the checkpoint target thread");
     }
     const registry = await listRegistry({ taskGuardHome });
     const key = registryKey(root, taskId);
@@ -554,14 +601,78 @@ export async function patchCheckpointResumeAutomation({
       delete patchedRegistryEntry.heartbeat_automation_id;
     }
     registry.tasks[key] = patchedRegistryEntry;
-    await writeRegistry(taskGuardHome, registry);
+    try {
+      await registryWriter(taskGuardHome, registry);
+    } catch {
+      registryError = {
+        code: "REGISTRY_UPDATE_FAILED",
+        message: "Checkpoint updated; derived registry repair is required",
+      };
+    }
   });
 
   return {
     checkpoint_path: checkpointPath,
-    registry_updated: true,
+    checkpoint_updated: true,
+    registry_updated: registryError === null,
+    recovery_required: registryError !== null,
+    ...(registryError ? { error: registryError } : {}),
     resume_mode: automation.status === "VERIFIED" ? "AUTOMATION" : "MANUAL",
     resume_automation: automation,
+  };
+}
+
+export async function repairCheckpointRegistry({
+  projectPath,
+  taskId,
+  taskGuardHome = defaultTaskGuardHome(),
+  registryWriter = writeRegistry,
+}) {
+  const rootBuffer = await git(path.resolve(projectPath), ["rev-parse", "--show-toplevel"]);
+  const root = path.resolve(rootBuffer.toString("utf8").trim());
+  const checkpointPath = path.join(root, CHECKPOINT_RELATIVE_PATH);
+  const state = await readCheckpoint(checkpointPath);
+  if (state.task_id !== taskId) {
+    throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
+  }
+  const now = new Date().toISOString();
+  await withRegistryLock(taskGuardHome, async () => {
+    const registry = await listRegistry({ taskGuardHome });
+    const key = registryKey(root, taskId);
+    const entry = {
+      ...(registry.tasks[key] ?? {}),
+      task_id: taskId,
+      project_path: root,
+      checkpoint_path: checkpointPath,
+      status: state.status.toLowerCase(),
+      resume_after: state.resume_after ?? null,
+      thread_reference: state.thread_reference ?? null,
+      updated_at: now,
+    };
+    if (state.quota_snapshot) {
+      entry.quota_snapshot_id = state.quota_snapshot.snapshot_id ?? null;
+      entry.quota_observed_at = state.quota_snapshot.observed_at ?? null;
+    }
+    if (state.resume_automation) {
+      entry.resume_mode = (state.resume_mode ?? "MANUAL").toLowerCase();
+      entry.resume_automation_status = state.resume_automation.status.toLowerCase();
+    } else {
+      delete entry.resume_mode;
+      delete entry.resume_automation_status;
+    }
+    if (state.heartbeat_automation_id) {
+      entry.heartbeat_automation_id = state.heartbeat_automation_id;
+    } else {
+      delete entry.heartbeat_automation_id;
+    }
+    registry.tasks[key] = entry;
+    await registryWriter(taskGuardHome, registry);
+  });
+  return {
+    checkpoint_path: checkpointPath,
+    checkpoint_updated: false,
+    registry_updated: true,
+    recovery_required: false,
   };
 }
 
@@ -592,6 +703,16 @@ export async function resumeTask({
   if (state.task_id !== taskId) {
     throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
   }
+  if (state.status?.toUpperCase() === "WORKING") {
+    return {
+      checkpoint_path: checkpointPath,
+      status: "already_resumed",
+      heartbeat_automation_id: state.heartbeat_automation_id ?? null,
+    };
+  }
+  if (state.status?.toUpperCase() !== "PAUSED_FOR_QUOTA") {
+    throw new Error("Task can only resume from PAUSED_FOR_QUOTA");
+  }
 
   const now = new Date().toISOString();
   const resumedState = {
@@ -599,18 +720,33 @@ export async function resumeTask({
     status: "WORKING",
     resumed_at: now,
     resume_after: null,
+    ...(state.resume_automation?.status === "VERIFIED" ? {
+      resume_automation: {
+        ...state.resume_automation,
+        status: "EXECUTED",
+        executed_at: now,
+        cleanup_required: false,
+      },
+    } : {}),
   };
   await withRegistryLock(taskGuardHome, async () => {
     const registry = await listRegistry({ taskGuardHome });
     const key = registryKey(root, taskId);
     if (!registry.tasks[key]) throw new Error("Task registry entry is missing");
     await atomicWrite(checkpointPath, renderCheckpoint(resumedState));
-    registry.tasks[key] = {
+    const resumedRegistryEntry = {
       ...registry.tasks[key],
       status: "working",
       resume_after: null,
+      ...(resumedState.resume_automation ? {
+        resume_automation_status: resumedState.resume_automation.status.toLowerCase(),
+      } : {}),
       updated_at: now,
     };
+    if (!resumedState.heartbeat_automation_id) {
+      delete resumedRegistryEntry.heartbeat_automation_id;
+    }
+    registry.tasks[key] = resumedRegistryEntry;
     await writeRegistry(taskGuardHome, registry);
   });
 

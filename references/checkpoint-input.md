@@ -26,7 +26,7 @@ Required fields are `task_id`, `task_description`, `status`, and at least one `e
     }
   },
   "resume_after": "2026-08-31T12:00:00.000Z",
-  "thread_reference": "current"
+  "thread_reference": "thread-concrete-id"
 }
 ```
 
@@ -38,19 +38,45 @@ node <skill-root>/scripts/task-guard.mjs checkpoint save --project <project> --i
 
 For a quota pause, wrap this object as `"checkpoint"` and the non-secret Discord fields as `"notification"`, then use `pause prepare` instead. It attempts one refresh and always attempts to save checkpoint schema v2. A refresh failure is stored as `quota_snapshot.freshness: "UNAVAILABLE"`; a cached snapshot may appear only as stale last-known context. In that case `resume_after` and `automation_schedule` are null, `resume_mode` is `MANUAL`, and Discord does not display cached quota or reset metadata as current.
 
-When the snapshot is authoritative and has a verified 300-minute reset, `resume_mode` is `AUTOMATION_ELIGIBLE`; checkpoint, registry, `automation_intent`, and `automation_schedule` share that snapshot ID, observation time, and reset. Discord is deferred until verification is finalized. Scheduling failures are distinguished as `AUTHORITATIVE_QUOTA_REQUIRED`, `FIVE_HOUR_QUOTA_UNAVAILABLE`, or `VERIFIED_FIVE_HOUR_RESET_REQUIRED`, but none prevents checkpoint preservation.
+When the snapshot is authoritative, has a verified 300-minute reset strictly after `observed_at`, and `thread_reference` is a concrete runtime thread ID, `resume_mode` is `AUTOMATION_ELIGIBLE`; checkpoint, registry, `automation_intent`, and `automation_schedule` share that snapshot ID, observation time, and reset. The logical literal `current` is not a concrete ID and yields `CONCRETE_THREAD_ID_REQUIRED`. Discord is deferred until verification is finalized. Scheduling failures are distinguished as `AUTHORITATIVE_QUOTA_REQUIRED`, `FIVE_HOUR_QUOTA_UNAVAILABLE`, `VERIFIED_FIVE_HOUR_RESET_REQUIRED`, or `CONCRETE_THREAD_ID_REQUIRED`, but none prevents checkpoint preservation.
 
 The utility writes `<project>/.codex/task-guard-checkpoint.md`, adds it to the repository-local Git exclude file, and stores minimal lookup metadata under the Codex home directory.
 
 Only one `WORKING` or `PAUSED_FOR_QUOTA` task may own a repository checkpoint. Saving a different `task_id` while one is active fails with `ACTIVE_CHECKPOINT_EXISTS` and leaves the first checkpoint untouched.
 
-After the agent completes create/view/reconciliation, submit the sanitized result and final notification together:
+After the agent completes create/view/reconciliation, keep the raw tool results transient and send the operation transcript through stdin to the Node verifier:
 
-```text
-node <skill-root>/scripts/task-guard.mjs pause finalize --project <project> --task-id <task-id> --input <result.json>
+```json
+{
+  "expected": { "...": "the automation_intent returned by pause prepare" },
+  "transcript": {
+    "operations": [
+      { "operation": "create", "result": { "automation_id": "automation-id" } },
+      { "operation": "view", "id": "automation-id", "result": { "...": "raw view result" } }
+    ]
+  }
+}
 ```
 
-`result.json` contains `resume_automation` plus non-secret `notification` fields. A verified state includes purpose, status, ID, attempts, verified time, target thread, resume time, snapshot ID, fingerprint, and boolean verification results. Do not include raw tool output or private fields. The narrow patch preserves quota snapshot, reset, exact next actions, task ID, thread reference, repository fingerprint, and pause metadata. `VERIFIED` is rejected unless persisted, identity, heartbeat kind, thread, schedule, and active-status checks are true.
+```text
+node <skill-root>/scripts/task-guard.mjs automation verify --input -
+```
+
+Do not write this transcript to disk or copy it into logs. The command returns only a sanitized state. A retry/reconciliation transcript adds operations in the exact order consumed: `view`, `reconcile`, a second `create`, and another `view` only when policy permits them. Represent tool errors with a non-secret `error.code` and minimal `error.message`.
+
+Then submit the same transient `automation_transcript` plus the final non-secret notification. Finalization intentionally re-runs the verifier rather than trusting caller-authored booleans:
+
+```text
+node <skill-root>/scripts/task-guard.mjs pause finalize --project <project> --task-id <task-id> --input -
+```
+
+The stdin object contains `automation_transcript` plus non-secret `notification` fields. Raw evidence is processed in memory and is never returned or stored. The derived verified state includes purpose, status, ID, attempts, verified time, `verification_source: READBACK`, target thread, resume time, snapshot ID, fingerprint, and boolean verification results including `id_match`. The narrow patch preserves quota snapshot, reset, exact next actions, task ID, thread reference, repository fingerprint, and pause metadata. `VERIFIED` is rejected unless all invariants match the existing paused intent. `checkpoint automation set` can record diagnostic non-verified states but cannot set `VERIFIED`.
+
+If a narrow patch returns `checkpoint_updated: true`, `registry_updated: false`, and `recovery_required: true`, the checkpoint already contains the authoritative result. Do not repeat create/finalize. Repair only the derived registry:
+
+```text
+node <skill-root>/scripts/task-guard.mjs checkpoint registry repair --project <project> --task-id <task-id>
+```
 
 ## Resume lifecycle input
 
@@ -80,7 +106,7 @@ After the Codex app has deleted or disabled the stored heartbeat, run the atomic
 node <skill-root>/scripts/task-guard.mjs resume prepare --project <project> --task-id <task-id> --input <resume.json>
 ```
 
-The command refreshes once, verifies checkpoint ownership and repository state, clears confirmed heartbeat metadata, marks the checkpoint working, and sends `TASK_RESUMED` from that same snapshot. It derives `resume_point` from the checkpoint. Optional `phases` and `safety_reserve_percent` use the same snapshot for an immediate next budget decision. If repository or heartbeat cleanup verification fails, it leaves the checkpoint incomplete, does not transition to `WORKING`, and returns `TASK_BLOCKED`.
+The command refreshes once, verifies checkpoint ownership/source state and repository state, and validates optional `phases` and `safety_reserve_percent` before any side effect. Only then does it clear confirmed heartbeat metadata, mark a verified automation `EXECUTED`, transition the checkpoint to working, and send `TASK_RESUMED` from the same snapshot. It derives `resume_point` from the checkpoint. If validation, repository verification, or heartbeat cleanup fails, it does not transition to `WORKING`; cleanup is not attempted before prevalidation. A second wake returns `ALREADY_RESUMED` without mutation or duplicate Discord.
 
 ## Discord event payload
 

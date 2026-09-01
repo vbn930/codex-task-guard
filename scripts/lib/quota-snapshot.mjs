@@ -150,10 +150,14 @@ export function validateFreshness(snapshot, { requireFiveHour = true } = {}) {
 export function validateVerifiedFiveHourReset(snapshot) {
   const authoritative = validateFreshness(snapshot);
   const resetAt = authoritative.five_hour.reset_at;
+  const observedAt = authoritative.observed_at;
   if (
     authoritative.five_hour.window_duration_minutes !== 300
     || typeof resetAt !== "string"
     || Number.isNaN(Date.parse(resetAt))
+    || typeof observedAt !== "string"
+    || Number.isNaN(Date.parse(observedAt))
+    || Date.parse(resetAt) <= Date.parse(observedAt)
   ) {
     throw new Error("VERIFIED_FIVE_HOUR_RESET_REQUIRED");
   }

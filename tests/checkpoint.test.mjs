@@ -11,6 +11,7 @@ import {
   listRegistry,
   patchCheckpointResumeAutomation,
   readCheckpoint,
+  repairCheckpointRegistry,
   resumeTask,
   saveCheckpoint,
   setCheckpointHeartbeat,
@@ -314,6 +315,48 @@ test("heartbeat patch preserves every existing pause field", async () => {
   assert.equal(registryEntry.heartbeat_automation_id, "automation-123");
 });
 
+test("heartbeat patch reports a recoverable registry partial write", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-heartbeat-recovery",
+      task_description: "Recover derived registry state",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Repair the registry"],
+    },
+  });
+
+  const result = await setCheckpointHeartbeat({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-heartbeat-recovery",
+    automationId: "automation-recovery",
+    registryWriter: async () => {
+      throw new Error("fault injection");
+    },
+  });
+
+  assert.equal(result.checkpoint_updated, true);
+  assert.equal(result.registry_updated, false);
+  assert.equal(result.recovery_required, true);
+  assert.equal(result.error.code, "REGISTRY_UPDATE_FAILED");
+  assert.equal((await readCheckpoint(saved.checkpoint_path)).heartbeat_automation_id,
+    "automation-recovery");
+  assert.equal(Object.values((await listRegistry({ taskGuardHome })).tasks)[0]
+    .heartbeat_automation_id, undefined);
+
+  const repaired = await repairCheckpointRegistry({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-heartbeat-recovery",
+  });
+  assert.equal(repaired.registry_updated, true);
+  assert.equal(Object.values((await listRegistry({ taskGuardHome })).tasks)[0]
+    .heartbeat_automation_id, "automation-recovery");
+});
+
 test("resume automation narrow patch preserves authoritative pause state and drops private fields", async () => {
   const { projectPath, taskGuardHome } = await createProject();
   const saved = await saveCheckpoint({
@@ -331,6 +374,17 @@ test("resume automation narrow patch preserves authoritative pause state and dro
       resume_after: "2026-08-31T17:32:11.000Z",
       exact_next_actions: ["Continue exact action"],
       thread_reference: "thread-123",
+      resume_mode: "AUTOMATION_ELIGIBLE",
+      resume_automation: {
+        purpose: "quota_resume",
+        status: "ELIGIBLE",
+        automation_id: null,
+        attempts: 0,
+        target_thread: "thread-123",
+        resume_after: "2026-08-31T17:32:11.000Z",
+        snapshot_id: "snapshot-A",
+        automation_fingerprint: "fingerprint-1",
+      },
     },
   });
   const before = await readCheckpoint(saved.checkpoint_path);
@@ -339,6 +393,7 @@ test("resume automation narrow patch preserves authoritative pause state and dro
     projectPath,
     taskGuardHome,
     taskId: "task-automation-state",
+    allowVerified: true,
     resumeAutomation: {
       purpose: "quota_resume",
       status: "VERIFIED",
@@ -349,8 +404,10 @@ test("resume automation narrow patch preserves authoritative pause state and dro
       resume_after: "2026-08-31T17:32:11.000Z",
       snapshot_id: "snapshot-A",
       automation_fingerprint: "fingerprint-1",
+      verification_source: "READBACK",
       verification: {
         persisted: true,
+        id_match: true,
         identity_match: true,
         kind_match: true,
         thread_match: true,
@@ -365,10 +422,14 @@ test("resume automation narrow patch preserves authoritative pause state and dro
 
   const after = await readCheckpoint(saved.checkpoint_path);
   const preserved = structuredClone(after);
+  const expectedPreserved = structuredClone(before);
   delete preserved.resume_automation;
   delete preserved.resume_mode;
   delete preserved.heartbeat_automation_id;
-  assert.deepEqual(preserved, before);
+  delete expectedPreserved.resume_automation;
+  delete expectedPreserved.resume_mode;
+  delete expectedPreserved.heartbeat_automation_id;
+  assert.deepEqual(preserved, expectedPreserved);
   assert.equal(after.resume_mode, "AUTOMATION");
   assert.equal(after.heartbeat_automation_id, "automation-123");
   assert.equal(after.resume_automation.status, "VERIFIED");
@@ -379,6 +440,127 @@ test("resume automation narrow patch preserves authoritative pause state and dro
   assert.deepEqual(after.exact_next_actions, ["Continue exact action"]);
   assert.equal(after.task_id, "task-automation-state");
   assert.equal(after.thread_reference, "thread-123");
+
+  await assert.rejects(
+    patchCheckpointResumeAutomation({
+      projectPath,
+      taskGuardHome,
+      taskId: "task-automation-state",
+      resumeAutomation: {
+        purpose: "quota_resume",
+        status: "FAILED",
+        automation_id: null,
+        attempts: 1,
+        last_error: "LATE_REWRITE",
+        resolution: "MANUAL_FALLBACK",
+      },
+    }),
+    /terminal automation state/i,
+  );
+});
+
+test("verified checkpoint automation requires every read-back invariant", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-verified-invariants",
+      task_description: "Reject incomplete verification",
+      status: "PAUSED_FOR_QUOTA",
+      quota_snapshot: { snapshot_id: "snapshot-invariants" },
+      resume_after: "2026-08-31T17:32:11.000Z",
+      exact_next_actions: ["Keep the checkpoint paused"],
+      thread_reference: "thread-invariants",
+      resume_automation: {
+        purpose: "quota_resume",
+        status: "ELIGIBLE",
+        automation_fingerprint: "fingerprint-invariants",
+      },
+    },
+  });
+  const incomplete = {
+    purpose: "quota_resume",
+    status: "VERIFIED",
+    automation_id: "automation-invariants",
+    attempts: 1,
+    verified_at: "2026-08-31T13:00:00.000Z",
+    verification_source: "READBACK",
+    target_thread: "thread-invariants",
+    resume_after: "2026-08-31T17:32:11.000Z",
+    snapshot_id: "snapshot-invariants",
+    automation_fingerprint: "fingerprint-invariants",
+    verification: {
+      persisted: true,
+      identity_match: true,
+      kind_match: true,
+      thread_match: true,
+      schedule_match: true,
+      status_active: true,
+    },
+  };
+
+  await assert.rejects(
+    patchCheckpointResumeAutomation({
+      projectPath,
+      taskGuardHome,
+      taskId: "task-verified-invariants",
+      resumeAutomation: incomplete,
+      allowVerified: true,
+    }),
+    /read-back verification/i,
+  );
+});
+
+test("resume automation patch keeps checkpoint authoritative on registry failure", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-automation-recovery",
+      task_description: "Recover automation registry metadata",
+      status: "PAUSED_FOR_QUOTA",
+      quota_snapshot: { snapshot_id: "snapshot-recovery" },
+      resume_after: "2026-08-31T17:32:11.000Z",
+      exact_next_actions: ["Repair derived metadata"],
+      thread_reference: "thread-recovery",
+    },
+  });
+
+  const result = await patchCheckpointResumeAutomation({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-automation-recovery",
+    resumeAutomation: {
+      purpose: "quota_resume",
+      status: "FAILED",
+      automation_id: null,
+      attempts: 1,
+      target_thread: "thread-recovery",
+      resume_after: "2026-08-31T17:32:11.000Z",
+      snapshot_id: "snapshot-recovery",
+      last_error: "NOT_FOUND",
+      resolution: "MANUAL_FALLBACK",
+    },
+    registryWriter: async () => {
+      throw new Error("fault injection");
+    },
+  });
+
+  assert.equal(result.checkpoint_updated, true);
+  assert.equal(result.registry_updated, false);
+  assert.equal(result.recovery_required, true);
+  assert.equal((await readCheckpoint(saved.checkpoint_path)).resume_automation.status, "FAILED");
+
+  await repairCheckpointRegistry({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-automation-recovery",
+  });
+  const entry = Object.values((await listRegistry({ taskGuardHome })).tasks)[0];
+  assert.equal(entry.resume_mode, "manual");
+  assert.equal(entry.resume_automation_status, "failed");
 });
 
 test("reads checkpoints written with the original JSON machine-state format", async () => {

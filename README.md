@@ -37,6 +37,7 @@ The command returns JSON and exits nonzero when a required check fails. An uncon
 ```text
 node scripts/task-guard.mjs quota
 node scripts/task-guard.mjs doctor --project C:\path\to\project
+node scripts/task-guard.mjs automation verify --input -
 node scripts/task-guard.mjs phase prepare --project C:\path\to\project --input budget.json
 node scripts/task-guard.mjs phase start --project C:\path\to\project --input phase.json
 node scripts/task-guard.mjs phase complete --project C:\path\to\project --phase-id implementation --concurrent-usage false
@@ -44,9 +45,10 @@ node scripts/task-guard.mjs phase finish --project C:\path\to\project --phase-id
 node scripts/task-guard.mjs history list --limit 100
 node scripts/task-guard.mjs budget evaluate --input budget.json
 node scripts/task-guard.mjs pause prepare --project C:\path\to\project --input pause.json
-node scripts/task-guard.mjs pause finalize --project C:\path\to\project --task-id task-24 --input automation-result.json
+node scripts/task-guard.mjs pause finalize --project C:\path\to\project --task-id task-24 --input -
 node scripts/task-guard.mjs resume prepare --project C:\path\to\project --task-id task-24 --input resume.json
 node scripts/task-guard.mjs checkpoint automation set --project C:\path\to\project --task-id task-24 --input automation-state.json
+node scripts/task-guard.mjs checkpoint registry repair --project C:\path\to\project --task-id task-24
 node scripts/task-guard.mjs checkpoint heartbeat set --project C:\path\to\project --task-id task-24 --automation-id automation-id
 node scripts/task-guard.mjs checkpoint heartbeat clear --project C:\path\to\project --task-id task-24
 node scripts/task-guard.mjs checkpoint save --project C:\path\to\project --input state.json
@@ -88,11 +90,15 @@ V1 estimates only an exact plan/model/reasoning/phase-type cohort. Samples are e
 
 The readable checkpoint is `<project>/.codex/task-guard-checkpoint.md`. Task Guard resolves Git's effective repository-local exclude path, including linked worktrees, and leaves tracked `.gitignore` untouched. The global registry is `%CODEX_HOME%\task-guard\index.json` or `%USERPROFILE%\.codex\task-guard\index.json` and stores only lookup metadata. Registry updates are serialized across concurrent projects. `checkpoint list` audits those paths and marks missing checkpoint files as stale.
 
-At quota pause, `pause prepare` attempts one refresh and always attempts checkpoint schema-v2 preservation. Only an authoritative five-hour snapshot with a verified reset produces a heartbeat intent. Eligible automation pauses deliberately defer Discord until `pause finalize`; a create request, rendered card, or returned ID is not success. `pause finalize` first narrow-patches the sanitized read-back result, then sends the final verified/manual status. If quota/reset is unavailable, prepare records and reports manual resume immediately without promoting cached data to current. Schema-v1 checkpoints and registry entries remain readable.
+At quota pause, `pause prepare` attempts one refresh and always attempts checkpoint schema-v2 preservation. Only an authoritative five-hour snapshot with a strictly future verified reset and a concrete thread ID produces a heartbeat intent. The literal `current` is logical intent, not a concrete ID, and is never promoted to a positive thread match. Eligible automation pauses deliberately defer Discord until `pause finalize`; a create request, rendered card, or returned ID is not success. The agent passes transient raw create/view evidence through `automation verify`, and `pause finalize` re-runs that same Node verifier before narrow-patching the sanitized result and sending the final verified/manual status. If quota/reset or concrete thread binding is unavailable, prepare records and reports manual resume immediately without promoting cached data to current. Schema-v1 checkpoints and registry entries remain readable.
 
-Rich automation results are attached with `checkpoint automation set`; legacy heartbeat ID set/clear commands remain available. These narrow patches preserve every other checkpoint field and reject `VERIFIED` unless read-back persistence, identity, kind, thread, schedule, and active-status checks are true. Raw tool responses and prompts are not copied into the checkpoint. `resume prepare` owns one authoritative snapshot across repository verification, checkpoint resume, `TASK_RESUMED`, and an optional immediate next budget decision. Task Guard re-hashes HEAD, streamed staged/unstaged diffs, status, and untracked file contents without following symbolic links. A mismatch returns `TASK_BLOCKED` with `REPOSITORY_STATE_CHANGED`, leaves the checkpoint incomplete, and never overwrites the repository or transitions it to working.
+`checkpoint automation set` remains diagnostic for non-verified states; it cannot author `VERIFIED`. Legacy heartbeat ID set/clear commands remain available. Narrow patches preserve every other checkpoint field and require `VERIFIED` to carry a real ID, attempts, timestamp, `READBACK` source, matching intent fingerprint, and true persistence/ID/identity/kind/thread/schedule/active checks. Raw tool responses and prompts are not copied into the checkpoint, registry, or command output. The project checkpoint is authoritative and the global registry is derived: a post-checkpoint registry failure is reported as recoverable partial state, and `checkpoint registry repair` rebuilds metadata from the checkpoint.
 
-When the Codex app exposes heartbeat create and ID-based view, `SKILL.md` directs the agent to create only a same-thread heartbeat, read it back, verify its fields, reconcile ambiguous ID-less results read-only, and retry create no more than once after confirmed absence. There is no assumed list/search API, no cron fallback, and no direct TOML mutation. Otherwise the checkpoint and `resume_after` provide a manual same-thread fallback. For a scheduled run that needs local project files, [official OpenAI documentation](https://learn.chatgpt.com/docs/automations) says to keep the computer powered on and the desktop app running.
+`resume prepare` owns one authoritative snapshot across prevalidation, repository verification, optional budget validation, cleanup, checkpoint resume, `TASK_RESUMED`, and the returned next decision. No cleanup or working transition occurs before validation succeeds. The first valid wake changes a verified automation to `EXECUTED`; a duplicate wake returns `ALREADY_RESUMED` without cleanup, mutation, or a second Discord event. Task Guard re-hashes HEAD, streamed staged/unstaged diffs, status, and untracked file contents without following symbolic links. A mismatch returns `TASK_BLOCKED` with `REPOSITORY_STATE_CHANGED`, preserves heartbeat metadata, and never overwrites the repository or transitions it to working.
+
+When the Codex app exposes heartbeat create and ID-based view, `SKILL.md` directs the agent to create only a same-thread heartbeat, read it back, verify the requested ID and fields, reconcile ambiguous results read-only, and retry create no more than once after repeated explicit `NOT_FOUND` plus confirmed absence. Unparseable, timeout, transport, structural, or ambiguous evidence cannot authorize a recreate. Schedules must have exactly one occurrence whose first wake is from the verified reset through five minutes afterward; repeating hourly/daily/weekly rules and `COUNT > 1` fail. There is no assumed list/search API, no cron fallback, and no direct TOML mutation. Otherwise the checkpoint and `resume_after` provide a manual same-thread fallback. For a scheduled run that needs local project files, [official OpenAI documentation](https://learn.chatgpt.com/docs/automations) says to keep the computer powered on and the desktop app running.
+
+`PERSISTENCE VERIFIED != FUTURE EXECUTION GUARANTEED`. `VERIFIED` proves registration and readable persisted fields; only a later wake can establish `EXECUTED`, and Codex Desktop scheduler defects remain outside Task Guard's guarantee.
 
 ## Discord events
 
@@ -116,7 +122,7 @@ set TASK_GUARD_TEST_QUOTA=low
 node scripts\task-guard.mjs quota
 ```
 
-The test suite covers the app-server JSONL handshake, strict quota mapping, phase measurements, history filtering, conservative budget selection, checkpoint persistence, same-thread automation create/view recovery, bounded retries, read-only filesystem reconciliation, field mismatches, linked worktrees, concurrent registry updates, large diffs, external repository changes, notification ordering, CLI behavior, and installation. Automation and Discord tests use mock adapters/transports and do not create a real automation or send a real webhook.
+The test suite covers the app-server JSONL handshake, strict quota mapping, phase measurements, history filtering, conservative budget selection, checkpoint persistence, the agent-to-Node verification transcript, ID/read-back matching, one-shot schedule semantics, bounded failure handling, read-only filesystem reconciliation, derived-registry recovery, resume prevalidation/idempotency, linked worktrees, concurrent registry updates, large diffs, external repository changes, notification ordering, CLI behavior, and installation. Automation and Discord tests use mock adapters/transports and do not create a real automation or send a real webhook.
 
 ## Uninstall
 

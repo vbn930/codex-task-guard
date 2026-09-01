@@ -123,3 +123,31 @@ test("reset validation distinguishes freshness window and reset failures", () =>
     /VERIFIED_FIVE_HOUR_RESET_REQUIRED/,
   );
 });
+
+test("verified five-hour reset must be strictly later than its observation", () => {
+  const base = {
+    freshness: "AUTHORITATIVE",
+    observed_at: "2026-08-31T12:00:00.000Z",
+    five_hour: {
+      available: true,
+      window_duration_minutes: 300,
+    },
+  };
+  assert.doesNotThrow(() => validateVerifiedFiveHourReset({
+    ...base,
+    five_hour: { ...base.five_hour, reset_at: "2026-08-31T12:00:01.000Z" },
+  }));
+  for (const resetAt of [
+    "2026-08-31T12:00:00.000Z",
+    "2026-08-31T11:59:59.000Z",
+    "not-a-date",
+  ]) {
+    assert.throws(
+      () => validateVerifiedFiveHourReset({
+        ...base,
+        five_hour: { ...base.five_hour, reset_at: resetAt },
+      }),
+      /VERIFIED_FIVE_HOUR_RESET_REQUIRED/,
+    );
+  }
+});

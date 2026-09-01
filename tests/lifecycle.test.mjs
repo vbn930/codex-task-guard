@@ -20,6 +20,7 @@ import {
 import { normalizeQuotaResponse } from "../scripts/lib/quota.mjs";
 import { QuotaSnapshotStore } from "../scripts/lib/quota-snapshot.mjs";
 import { startPhase } from "../scripts/lib/usage.mjs";
+import { verifyAutomationTranscript } from "../scripts/lib/automation.mjs";
 
 function snapshot(remaining, observedAt, resetAt = "2027-01-15T08:00:00.000Z") {
   return {
@@ -236,7 +237,7 @@ test("quota pause defers Discord until a verified automation result is checkpoin
       task_description: "Implement authoritative quota snapshots",
       status: "PAUSED_FOR_QUOTA",
       exact_next_actions: ["Resume freshness integration tests"],
-      thread_reference: "current",
+      thread_reference: "thread-fresh",
     },
     notificationPayload: {
       project: "codex-task-guard",
@@ -262,32 +263,42 @@ test("quota pause defers Discord until a verified automation result is checkpoin
   assert.equal(result.notification, null);
   assert.equal(result.automation_intent.kind, "heartbeat");
   assert.equal(result.automation_intent.destination, "thread");
-  assert.equal(result.automation_intent.target_thread, "current");
+  assert.equal(result.automation_intent.target_thread, "thread-fresh");
+
+  const automationTranscript = {
+    operations: [
+      { operation: "create", result: { automation_id: "automation-verified" } },
+      {
+        operation: "view",
+        id: "automation-verified",
+        result: {
+          id: "automation-verified",
+          kind: "heartbeat",
+          status: "ACTIVE",
+          name: "fresh-pause quota resume",
+          destination: "thread",
+          targetThreadId: "thread-fresh",
+          rrule: "DTSTART:20270115T080000Z\nRRULE:FREQ=DAILY;COUNT=1",
+          prompt: result.automation_intent.prompt,
+          private: "transient-only",
+        },
+      },
+    ],
+  };
+  const sanitized = await verifyAutomationTranscript({
+    expected: result.automation_intent,
+    transcript: automationTranscript,
+    delay: async () => {},
+  });
+  assert.equal(sanitized.status, "VERIFIED");
+  assert.equal(sanitized.verification_source, "READBACK");
+  assert.equal(JSON.stringify(sanitized).includes("transient-only"), false);
 
   const finalized = await finalizeQuotaPause({
     projectPath,
     taskGuardHome,
     taskId: "fresh-pause",
-    resumeAutomation: {
-      purpose: "quota_resume",
-      status: "VERIFIED",
-      automation_id: "automation-verified",
-      attempts: 1,
-      verified_at: "2026-08-31T13:00:00.000Z",
-      target_thread: "current",
-      resume_after: resetAt,
-      snapshot_id: result.snapshot.snapshot_id,
-      automation_fingerprint: result.automation_intent.automation_fingerprint,
-      verification: {
-        persisted: true,
-        identity_match: true,
-        kind_match: true,
-        thread_match: true,
-        schedule_match: true,
-        status_active: true,
-        prompt_match: true,
-      },
-    },
+    automationTranscript,
     notificationPayload: {
       project: "codex-task-guard",
       task: "Implement authoritative quota snapshots",
@@ -426,16 +437,11 @@ test("failed automation verification is checkpointed before manual-resume Discor
     projectPath,
     taskGuardHome,
     taskId: "failed-automation",
-    resumeAutomation: {
-      purpose: "quota_resume",
-      status: "FAILED",
-      automation_id: null,
-      attempts: 2,
-      target_thread: "thread-failed",
-      resume_after: resetAt,
-      snapshot_id: current.snapshot_id,
-      last_error: "PERSISTENCE_NOT_VERIFIED",
-      resolution: "MANUAL_FALLBACK",
+    automationTranscript: {
+      operations: [{
+        operation: "create",
+        error: { code: "SCHEMA_UNSUPPORTED", message: "heartbeat schema unsupported" },
+      }],
     },
     notificationPayload: {
       project: "codex-task-guard",
@@ -491,6 +497,40 @@ test("quota pause blocks automation but keeps the checkpoint when reset is unver
   assert.equal(result.automation_schedule, null);
   assert.equal(result.automation_schedule_error, "VERIFIED_FIVE_HOUR_RESET_REQUIRED");
   assert.equal(result.resume_mode, "MANUAL");
+});
+
+test("quota pause does not invent a concrete ID for implicit current-thread binding", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-pause-current-thread-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  execFileSync("git", ["init", "-q", projectPath]);
+  const current = snapshot(
+    6,
+    "2026-08-31T12:24:00.000Z",
+    "2026-08-31T17:24:00.000Z",
+  );
+
+  const result = await prepareQuotaPause({
+    projectPath,
+    taskGuardHome,
+    snapshotStore: { refresh: async () => current },
+    checkpointState: {
+      task_id: "pause-implicit-current",
+      task_description: "Do not invent a target thread ID",
+      status: "PAUSED_FOR_QUOTA",
+      exact_next_actions: ["Resume manually"],
+      thread_reference: "current",
+    },
+    notificationPayload: { project: "demo", task: "Implicit target" },
+    notifyOptions: { env: {} },
+  });
+
+  const checkpoint = await readCheckpoint(result.checkpoint.checkpoint_path);
+  assert.equal(result.automation_intent, null);
+  assert.equal(result.automation_schedule_error, "CONCRETE_THREAD_ID_REQUIRED");
+  assert.equal(result.resume_mode, "MANUAL");
+  assert.equal(checkpoint.thread_reference, "current");
+  assert.equal(checkpoint.resume_after, current.five_hour.reset_at);
 });
 
 test("task resume uses one authoritative snapshot for resume Discord and next decision", async () => {
@@ -577,6 +617,116 @@ test("task resume uses one authoritative snapshot for resume Discord and next de
   assert.equal(fields["Resume Point"], "Continue the resume integration");
 });
 
+test("invalid optional budget input cannot partially resume or clean up", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-resume-prevalidation-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  execFileSync("git", ["init", "-q", projectPath]);
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "resume-prevalidation-task",
+      task_description: "Validate before resume side effects",
+      status: "PAUSED_FOR_QUOTA",
+      heartbeat_automation_id: "automation-prevalidation",
+      exact_next_actions: ["Keep this paused on invalid input"],
+    },
+  });
+  let cleanupCalls = 0;
+  let notificationCalls = 0;
+
+  await assert.rejects(
+    prepareTaskResume({
+      projectPath,
+      taskGuardHome,
+      taskId: "resume-prevalidation-task",
+      snapshotStore: {
+        refresh: async () => snapshot(100, "2026-08-31T12:31:00.000Z"),
+      },
+      cleanupHeartbeat: async () => {
+        cleanupCalls += 1;
+        return true;
+      },
+      notifyOptions: {
+        env: { CODEX_DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/secret" },
+        fetchImpl: async () => {
+          notificationCalls += 1;
+          return { ok: true, status: 204 };
+        },
+      },
+      phases: [{}],
+      safetyReservePercent: 5,
+    }),
+    /phases\[0\]\.phase_id must be a non-empty string/,
+  );
+
+  const checkpoint = await readCheckpoint(saved.checkpoint_path);
+  assert.equal(checkpoint.status, "PAUSED_FOR_QUOTA");
+  assert.equal(checkpoint.heartbeat_automation_id, "automation-prevalidation");
+  assert.equal(cleanupCalls, 0);
+  assert.equal(notificationCalls, 0);
+});
+
+test("duplicate resume wake is idempotent and emits no second side effects", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-resume-idempotent-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  execFileSync("git", ["init", "-q", projectPath]);
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "resume-idempotent-task",
+      task_description: "Ignore a duplicate scheduled wake",
+      status: "PAUSED_FOR_QUOTA",
+      heartbeat_automation_id: "automation-idempotent",
+      resume_automation: {
+        purpose: "quota_resume",
+        status: "VERIFIED",
+        automation_id: "automation-idempotent",
+      },
+      exact_next_actions: ["Continue once"],
+    },
+  });
+  let cleanupCalls = 0;
+  let notificationCalls = 0;
+  const options = {
+    projectPath,
+    taskGuardHome,
+    taskId: "resume-idempotent-task",
+    snapshotStore: {
+      refresh: async () => snapshot(100, "2026-08-31T12:31:00.000Z"),
+    },
+    cleanupHeartbeat: async () => {
+      cleanupCalls += 1;
+      return true;
+    },
+    notificationPayload: { project: "demo", task: "Resume once" },
+    notifyOptions: {
+      env: { CODEX_DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/secret" },
+      fetchImpl: async () => {
+        notificationCalls += 1;
+        return { ok: true, status: 204 };
+      },
+    },
+  };
+
+  const first = await prepareTaskResume(options);
+  const afterFirst = await readCheckpoint(saved.checkpoint_path);
+  const second = await prepareTaskResume(options);
+  const afterSecond = await readCheckpoint(saved.checkpoint_path);
+
+  assert.equal(first.status, "TASK_RESUMED");
+  assert.equal(second.status, "ALREADY_RESUMED");
+  assert.equal(second.resume, null);
+  assert.equal(second.notification, null);
+  assert.equal(cleanupCalls, 1);
+  assert.equal(notificationCalls, 1);
+  assert.equal(afterFirst.resume_automation.status, "EXECUTED");
+  assert.deepEqual(afterSecond, afterFirst);
+});
+
 test("task resume blocks without a working transition when repository verification fails", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-resume-blocked-"));
   const projectPath = path.join(root, "project");
@@ -634,12 +784,12 @@ test("task resume blocks without a working transition when repository verificati
   const checkpoint = await readCheckpoint(saved.checkpoint_path);
   const [registryEntry] = Object.values((await listRegistry({ taskGuardHome })).tasks);
   assert.equal(refreshReads, 1);
-  assert.equal(cleaned, true);
+  assert.equal(cleaned, false);
   assert.equal(result.status, "TASK_BLOCKED");
   assert.equal(result.resume, null);
   assert.equal(result.verification.reason, "REPOSITORY_STATE_CHANGED");
   assert.equal(checkpoint.status, "PAUSED_FOR_QUOTA");
-  assert.equal(checkpoint.heartbeat_automation_id, undefined);
+  assert.equal(checkpoint.heartbeat_automation_id, "automation-blocked");
   assert.equal(registryEntry.status, "paused_for_quota");
   assert.equal(discordBody.embeds[0].title, "❌ Codex Task Blocked");
 });
