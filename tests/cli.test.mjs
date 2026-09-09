@@ -303,11 +303,15 @@ test("phase lifecycle records history and budget evaluate selects a measured pha
   const historyRecords = JSON.parse(history.stdout);
   assert.equal(historyRecords.length, 1);
   assert.equal(historyRecords[0].plan, "plus");
-  assert.equal(historyRecords[0].confidence, "high");
+  assert.equal(historyRecords[0].schema_version, 2);
+  assert.equal(typeof historyRecords[0].phase_run_id, "string");
+  assert.equal(historyRecords[0].measurement_confidence, "HIGH_CONFIDENCE");
   assert.equal(historyRecords[0].model, "gpt-5.6-sol");
   assert.equal(historyRecords[0].reasoning_effort, "high");
   assert.equal(historyRecords[0].phase_type, "implementation");
-  assert.equal(historyRecords[0].reset_during_phase, false);
+  assert.equal(historyRecords[0].reset_occurred, false);
+  assert.equal("confidence" in historyRecords[0], false);
+  assert.equal("reset_during_phase" in historyRecords[0], false);
 
   await writeFile(budgetInput, JSON.stringify({
     safety_reserve_percent: 5,

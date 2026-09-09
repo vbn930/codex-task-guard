@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
   mkdir,
@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
-import { withFileLock } from "./fs-safe.mjs";
+import { atomicWriteText, withFileLock } from "./fs-safe.mjs";
 import { validateFreshness } from "./quota-snapshot.mjs";
 import { canonicalProjectIdentity, resolveProjectRoot } from "./repository-state.mjs";
 import { defaultTaskGuardHome } from "./runtime-paths.mjs";
@@ -62,6 +62,11 @@ function activePhasePath(projectPath, taskGuardHome) {
   return path.join(taskGuardHome, "active-phases", `${projectKey}.json`);
 }
 
+function legacyPhaseRunId(record) {
+  const identity = JSON.stringify([record.task_id, record.phase_id, record.started_at]);
+  return `legacy-${createHash("sha256").update(identity).digest("hex")}`;
+}
+
 async function withHistoryLock(taskGuardHome, operation) {
   return withFileLock(path.join(taskGuardHome, "usage-history.lock"), operation, {
     timeoutMessage: "Timed out waiting for the usage history lock",
@@ -82,6 +87,7 @@ export async function startPhase({
   const projectRoot = await resolveProjectRoot(projectPath, { allowNonGit: true });
   const state = {
     ...normalized,
+    phase_run_id: randomUUID(),
     project_path: projectRoot,
     project: path.basename(projectRoot),
     started_at: startedAt.toISOString(),
@@ -108,6 +114,7 @@ export async function startPhase({
   }
   return {
     phase_id: state.phase_id,
+    phase_run_id: state.phase_run_id,
     started_at: state.started_at,
     quota_before: state.quota_before,
     quota_before_observed_at: state.quota_before_observed_at,
@@ -123,6 +130,7 @@ export async function completePhase({
   snapshot,
   taskGuardHome = defaultTaskGuardHome(),
   now = () => new Date(),
+  activeStateRemover = rm,
 }) {
   if (![true, false, null].includes(concurrentUsage)) {
     throw new Error("concurrentUsage must be true, false, or null");
@@ -136,6 +144,7 @@ export async function completePhase({
     snapshot,
     taskGuardHome,
     now,
+    activeStateRemover,
   }), { timeoutMessage: "Timed out waiting for the usage history lock" });
 }
 
@@ -146,9 +155,19 @@ async function completePhaseLocked({
   snapshot,
   taskGuardHome,
   now,
+  activeStateRemover,
 }) {
   const state = JSON.parse(await readFile(statePath, "utf8"));
   if (state.phase_id !== phaseId) throw new Error("Active phase ID does not match");
+  const phaseRunId = state.phase_run_id ?? legacyPhaseRunId(state);
+  const existingRecord = await withHistoryLock(taskGuardHome, async () => {
+    const history = await loadAndRepairUsageHistory(taskGuardHome);
+    return history.records.find((record) => record.phase_run_id === phaseRunId) ?? null;
+  });
+  if (existingRecord) {
+    await activeStateRemover(statePath, { force: true });
+    return existingRecord;
+  }
 
   const authoritative = requireSnapshot(snapshot);
   const quota = authoritative.five_hour;
@@ -176,6 +195,8 @@ async function completePhaseLocked({
     ? "HIGH_CONFIDENCE"
     : "LOW_CONFIDENCE";
   const record = {
+    schema_version: 2,
+    phase_run_id: phaseRunId,
     project: state.project,
     task_id: state.task_id,
     phase_id: state.phase_id,
@@ -202,37 +223,106 @@ async function completePhaseLocked({
       (completedAt.valueOf() - new Date(state.started_at).valueOf()) / 1_000,
     )),
     reset_occurred: resetOccurred,
-    reset_during_phase: resetOccurred,
     window_identity: windowIdentity,
     concurrency_known: concurrencyKnown,
     concurrent_usage: concurrentUsage,
     concurrency_status: concurrencyStatus,
     external_usage_possible: concurrentUsage !== false,
     measurement_confidence: measurementConfidence,
-    confidence: measurementConfidence === "HIGH_CONFIDENCE" ? "high" : "low",
   };
 
+  let committedRecord;
   await withHistoryLock(taskGuardHome, async () => {
-    await appendFile(
-      path.join(taskGuardHome, "usage-history.jsonl"),
-      `${JSON.stringify(record)}\n`,
-      "utf8",
-    );
+    const history = await loadAndRepairUsageHistory(taskGuardHome);
+    committedRecord = history.records.find((entry) => entry.phase_run_id === phaseRunId) ?? null;
+    if (!committedRecord) {
+      await appendFile(
+        history.historyPath,
+        `${JSON.stringify(record)}\n`,
+        "utf8",
+      );
+      committedRecord = record;
+    }
   });
-  await rm(statePath, { force: true });
-  return record;
+  await activeStateRemover(statePath, { force: true });
+  return committedRecord;
+}
+
+export function normalizeUsageRecord(record) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    throw new Error("Usage record must be an object");
+  }
+  const normalized = {
+    ...record,
+    schema_version: 2,
+    phase_run_id: record.phase_run_id ?? legacyPhaseRunId(record),
+  };
+  if (normalized.measurement_confidence === undefined && record.confidence !== undefined) {
+    normalized.measurement_confidence = record.confidence === "high"
+      ? "HIGH_CONFIDENCE"
+      : "LOW_CONFIDENCE";
+  }
+  if (normalized.reset_occurred === undefined && record.reset_during_phase !== undefined) {
+    normalized.reset_occurred = record.reset_during_phase;
+  }
+  delete normalized.confidence;
+  delete normalized.reset_during_phase;
+  return normalized;
+}
+
+function parseUsageHistory(content) {
+  const lines = content.split(/\r?\n/);
+  const unterminated = content.length > 0 && !/[\r\n]$/.test(content);
+  const records = [];
+  const validLines = [];
+  let interruptedFinalLine = false;
+  for (const [index, line] of lines.entries()) {
+    if (line === "") continue;
+    try {
+      records.push(normalizeUsageRecord(JSON.parse(line)));
+      validLines.push(line);
+    } catch (error) {
+      if (unterminated && index === lines.length - 1 && error instanceof SyntaxError) {
+        interruptedFinalLine = true;
+        break;
+      }
+      const corrupted = new Error(
+        `HISTORY_CORRUPTED: invalid JSONL record at line ${index + 1}`,
+        { cause: error },
+      );
+      corrupted.code = "HISTORY_CORRUPTED";
+      throw corrupted;
+    }
+  }
+  return {
+    records,
+    interruptedFinalLine,
+    validContent: validLines.length > 0 ? `${validLines.join("\n")}\n` : "",
+  };
+}
+
+async function loadUsageHistory(taskGuardHome) {
+  const historyPath = path.join(taskGuardHome, "usage-history.jsonl");
+  const content = await readFile(historyPath, "utf8").catch((error) => {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  });
+  return { historyPath, ...parseUsageHistory(content) };
+}
+
+async function loadAndRepairUsageHistory(taskGuardHome) {
+  const history = await loadUsageHistory(taskGuardHome);
+  if (history.interruptedFinalLine) {
+    await atomicWriteText(history.historyPath, history.validContent);
+  }
+  return history;
 }
 
 export async function readUsageHistory({
   taskGuardHome = defaultTaskGuardHome(),
   limit = 500,
 } = {}) {
-  const historyPath = path.join(taskGuardHome, "usage-history.jsonl");
-  const content = await readFile(historyPath, "utf8").catch((error) => {
-    if (error.code === "ENOENT") return "";
-    throw error;
-  });
-  const records = content.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  const { records } = await loadUsageHistory(taskGuardHome);
   return records.slice(-limit);
 }
 
@@ -263,9 +353,10 @@ export function estimatePhaseCost({ history, phase }) {
     };
   }
   const costs = history
+    .map((record) => normalizeUsageRecord(record))
     .filter((record) => (
-      (record.measurement_confidence === "HIGH_CONFIDENCE" || record.confidence === "high")
-      && (record.reset_occurred === false || record.reset_during_phase === false)
+      record.measurement_confidence === "HIGH_CONFIDENCE"
+      && record.reset_occurred === false
       && Number.isFinite(record.quota_delta)
       && record.quota_delta > 0
       && record.model === cohort.model

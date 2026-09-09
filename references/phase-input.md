@@ -43,7 +43,7 @@ Complete a phase with:
 node <skill-root>/scripts/task-guard.mjs phase complete --project <project> --phase-id <phase-id> --concurrent-usage false
 ```
 
-`--concurrent-usage` accepts `true`, `false`, or `unknown`. Use `false` only when no other Codex thread, ChatGPT Work task, Workspace Agent, or other shared-pool consumer ran during the measurement. Completion appends one metadata-only record to `%CODEX_HOME%/task-guard/usage-history.jsonl`.
+`--concurrent-usage` accepts `true`, `false`, or `unknown`. Use `false` only when no other Codex thread, ChatGPT Work task, Workspace Agent, or other shared-pool consumer ran during the measurement. Completion commits one metadata-only schema-v2 record to `%CODEX_HOME%/task-guard/usage-history.jsonl`. Its `phase_run_id` makes completion idempotent if active-state cleanup must be retried.
 
 ## Evaluate pending phases
 

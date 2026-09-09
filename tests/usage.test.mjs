@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -153,10 +153,14 @@ test("records measured phase usage without storing source contents", async () =>
 
   assert.equal(completed.quota_delta, 13);
   assert.equal(completed.duration_seconds, 940);
-  assert.equal(completed.reset_during_phase, false);
+  assert.equal(completed.schema_version, 2);
+  assert.equal(typeof completed.phase_run_id, "string");
+  assert.equal(completed.reset_occurred, false);
   assert.equal(completed.concurrency_known, true);
   assert.equal(completed.concurrent_usage, false);
-  assert.equal(completed.confidence, "high");
+  assert.equal(completed.measurement_confidence, "HIGH_CONFIDENCE");
+  assert.equal("confidence" in completed, false);
+  assert.equal("reset_during_phase" in completed, false);
 
   const history = await readUsageHistory({ taskGuardHome });
   assert.deepEqual(history, [completed]);
@@ -206,10 +210,10 @@ test("does not attribute quota usage when the five-hour window resets during a p
   });
 
   assert.equal(completed.quota_delta, null);
-  assert.equal(completed.reset_during_phase, true);
+  assert.equal(completed.reset_occurred, true);
   assert.equal(completed.concurrency_known, false);
   assert.equal(completed.concurrent_usage, null);
-  assert.equal(completed.confidence, "low");
+  assert.equal(completed.measurement_confidence, "LOW_CONFIDENCE");
 });
 
 test("estimates a conservative phase cost from high-confidence exact-cohort history", () => {
@@ -435,4 +439,114 @@ test("concurrent phase completion records exactly one history sample", async () 
   assert.equal(results.filter(({ status }) => status === "fulfilled").length, 1);
   assert.equal(results.filter(({ status }) => status === "rejected").length, 1);
   assert.equal((await readUsageHistory({ taskGuardHome })).length, 1);
+});
+
+test("phase completion retry reuses the committed measurement after active-state cleanup fails", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-usage-retry-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  await mkdir(projectPath);
+  await startPhase({
+    projectPath,
+    taskGuardHome,
+    metadata: {
+      task_id: "task-retry",
+      phase_id: "implementation",
+      phase_type: "implementation",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+    },
+    snapshot: authoritativeSnapshot(45, "2026-08-31T01:00:00.000Z"),
+  });
+
+  await assert.rejects(completePhase({
+    projectPath,
+    taskGuardHome,
+    phaseId: "implementation",
+    concurrentUsage: false,
+    snapshot: authoritativeSnapshot(40, "2026-08-31T01:10:00.000Z"),
+    activeStateRemover: async () => { throw new Error("injected cleanup failure"); },
+  }), /injected cleanup failure/);
+  const [committed] = await readUsageHistory({ taskGuardHome });
+
+  const retried = await completePhase({
+    projectPath,
+    taskGuardHome,
+    phaseId: "implementation",
+    concurrentUsage: false,
+  });
+
+  assert.equal(retried.phase_run_id, committed.phase_run_id);
+  assert.equal((await readUsageHistory({ taskGuardHome })).length, 1);
+});
+
+test("usage history recovers an interrupted final JSONL write", async () => {
+  const taskGuardHome = await mkdtemp(path.join(os.tmpdir(), "task-guard-history-tail-"));
+  const record = { task_id: "valid", phase_id: "phase", started_at: "2026-08-31T01:00:00.000Z" };
+  await writeFile(
+    path.join(taskGuardHome, "usage-history.jsonl"),
+    `${JSON.stringify(record)}\n{"task_id":"partial"`,
+    "utf8",
+  );
+
+  const history = await readUsageHistory({ taskGuardHome });
+
+  assert.equal(history.length, 1);
+  assert.equal(history[0].task_id, "valid");
+  assert.equal(history[0].schema_version, 2);
+});
+
+test("phase completion repairs an interrupted history tail before appending", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-history-repair-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  await mkdir(projectPath);
+  await startPhase({
+    projectPath,
+    taskGuardHome,
+    metadata: {
+      task_id: "task-after-tail",
+      phase_id: "implementation",
+      phase_type: "implementation",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+    },
+    snapshot: authoritativeSnapshot(45, "2026-08-31T01:00:00.000Z"),
+  });
+  const prior = { task_id: "prior", phase_id: "phase", started_at: "2026-08-30T01:00:00.000Z" };
+  await writeFile(
+    path.join(taskGuardHome, "usage-history.jsonl"),
+    `${JSON.stringify(prior)}\n{"task_id":"partial"`,
+    "utf8",
+  );
+
+  await completePhase({
+    projectPath,
+    taskGuardHome,
+    phaseId: "implementation",
+    concurrentUsage: false,
+    snapshot: authoritativeSnapshot(40, "2026-08-31T01:10:00.000Z"),
+  });
+
+  const history = await readUsageHistory({ taskGuardHome });
+  assert.deepEqual(history.map((record) => record.task_id), ["prior", "task-after-tail"]);
+});
+
+test("usage history rejects a corrupted middle JSONL record", async () => {
+  const taskGuardHome = await mkdtemp(path.join(os.tmpdir(), "task-guard-history-middle-"));
+  const valid = JSON.stringify({
+    task_id: "valid",
+    phase_id: "phase",
+    started_at: "2026-08-31T01:00:00.000Z",
+  });
+  await writeFile(
+    path.join(taskGuardHome, "usage-history.jsonl"),
+    `${valid}\n{"broken":\n${valid}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(
+    readUsageHistory({ taskGuardHome }),
+    /HISTORY_CORRUPTED: invalid JSONL record at line 2/,
+  );
 });
