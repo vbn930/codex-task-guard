@@ -4,6 +4,8 @@ All notable changes to Codex Task Guard are documented here.
 
 ## Unreleased
 
+## 0.2.0 - 2026-09-09
+
 ### Added
 
 - Shared filesystem, runtime-path, repository-state, and task-registry modules.
@@ -19,6 +21,11 @@ All notable changes to Codex Task Guard are documented here.
 - Centralized durable automation statuses, trace events, and manual resolution semantics.
 - Made phase completion idempotent across interrupted active-state cleanup.
 - Preserved authoritative quota observations when snapshot cache persistence fails.
+
+### Fixed
+
+- Made test discovery work on Windows with Node.js 20.
+- Compared canonical temporary paths in checkpoint tests on hosted Windows runners.
 
 ### Security
 
