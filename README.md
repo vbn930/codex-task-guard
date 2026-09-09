@@ -78,7 +78,7 @@ Task Guard starts `codex app-server --listen stdio://`, performs the JSONL initi
 
 Only exact 300-minute and 10,080-minute windows are labeled five-hour and weekly. Missing data produces `"available": false`; Task Guard does not guess. The app-server interface is currently marked experimental by the CLI, so a Codex update can require a compatibility change.
 
-Every read is wrapped as a timestamped quota snapshot with `source`, `observed_at`, `snapshot_id`, availability, and freshness. A successful JIT read is `AUTHORITATIVE`; a persisted last-known snapshot is always `STALE` because Task Guard does not invent a time threshold. Refresh failure returns `UNAVAILABLE` and may include the stale `last_known_snapshot`, which is never presented as current. The metadata-only cache is `%CODEX_HOME%\task-guard\quota-snapshot.json`.
+Every read is wrapped as a timestamped quota snapshot with `source`, `observed_at`, `snapshot_id`, availability, and freshness. A successful JIT read is `AUTHORITATIVE`; a persisted last-known snapshot is always `STALE` because Task Guard does not invent a time threshold. Reader failure returns `UNAVAILABLE` and may include the stale `last_known_snapshot`, which is never presented as current. If the read succeeds but the metadata-only cache at `%CODEX_HOME%\task-guard\quota-snapshot.json` cannot be written, the observation remains `AUTHORITATIVE` and reports `SNAPSHOT_PERSIST_FAILED` separately.
 
 ## Quota-budgeted phases
 

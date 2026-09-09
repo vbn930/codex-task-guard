@@ -15,6 +15,7 @@ export function unavailableQuotaSnapshot({
   source = "codex_app_server",
   observedAt = new Date(),
   lastKnownSnapshot,
+  errorCode = "RATE_LIMIT_REFRESH_FAILED",
 } = {}) {
   const date = observedAt instanceof Date ? observedAt : new Date(observedAt);
   return {
@@ -24,7 +25,7 @@ export function unavailableQuotaSnapshot({
     availability: "UNAVAILABLE",
     five_hour: unavailableWindow(),
     weekly: unavailableWindow(),
-    error: { code: "RATE_LIMIT_REFRESH_FAILED" },
+    error: { code: errorCode },
     ...(lastKnownSnapshot ? {
       last_known_snapshot: { ...lastKnownSnapshot, freshness: "STALE" },
     } : {}),
@@ -81,19 +82,21 @@ export class QuotaSnapshotStore {
     reader,
     now = () => new Date(),
     source = "codex_app_server",
+    snapshotWriter = atomicWriteText,
   } = {}) {
     if (typeof reader !== "function") throw new Error("Quota snapshot reader is required");
+    if (typeof snapshotWriter !== "function") throw new Error("Snapshot writer must be a function");
     this.reader = reader;
     this.now = now;
     this.source = source;
+    this.snapshotWriter = snapshotWriter;
     this.snapshotPath = path.join(taskGuardHome, "quota-snapshot.json");
   }
 
   async refresh() {
+    let observation;
     try {
-      const snapshot = asAuthoritativeSnapshot(await this.reader());
-      await this.record(snapshot);
-      return snapshot;
+      observation = await this.reader();
     } catch {
       const lastKnown = await this.latest().catch(() => null);
       return unavailableQuotaSnapshot({
@@ -101,6 +104,32 @@ export class QuotaSnapshotStore {
         observedAt: this.now(),
         lastKnownSnapshot: lastKnown,
       });
+    }
+
+    let snapshot;
+    try {
+      snapshot = asAuthoritativeSnapshot(observation);
+    } catch {
+      const lastKnown = await this.latest().catch(() => null);
+      return unavailableQuotaSnapshot({
+        source: this.source,
+        observedAt: this.now(),
+        lastKnownSnapshot: lastKnown,
+        errorCode: "QUOTA_NORMALIZATION_FAILED",
+      });
+    }
+
+    try {
+      await this.record(snapshot);
+      return snapshot;
+    } catch {
+      return {
+        ...snapshot,
+        persistence: {
+          status: "FAILED",
+          error_code: "SNAPSHOT_PERSIST_FAILED",
+        },
+      };
     }
   }
 
@@ -116,7 +145,7 @@ export class QuotaSnapshotStore {
 
   async record(snapshot) {
     const authoritative = asAuthoritativeSnapshot(snapshot);
-    await atomicWriteText(this.snapshotPath, `${JSON.stringify(authoritative, null, 2)}\n`);
+    await this.snapshotWriter(this.snapshotPath, `${JSON.stringify(authoritative, null, 2)}\n`);
     return authoritative;
   }
 }

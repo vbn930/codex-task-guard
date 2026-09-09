@@ -82,6 +82,42 @@ test("refresh failure returns unavailable and keeps the last known snapshot stal
   assert.equal(failed.last_known_snapshot.five_hour.remaining_percent, 16);
 });
 
+test("authoritative quota remains usable when snapshot cache persistence fails", async () => {
+  const taskGuardHome = await mkdtemp(path.join(os.tmpdir(), "task-guard-snapshot-write-"));
+  const store = new QuotaSnapshotStore({
+    taskGuardHome,
+    reader: async () => normalizeQuotaResponse({
+      rateLimits: {
+        primary: { usedPercent: 84, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+      },
+    }, { observedAt: "2026-08-31T12:20:00.000Z" }),
+    snapshotWriter: async () => { throw new Error("injected cache write failure"); },
+  });
+
+  const snapshot = await store.refresh();
+
+  assert.equal(snapshot.freshness, "AUTHORITATIVE");
+  assert.equal(snapshot.five_hour.remaining_percent, 16);
+  assert.deepEqual(snapshot.persistence, {
+    status: "FAILED",
+    error_code: "SNAPSHOT_PERSIST_FAILED",
+  });
+  assert.equal(await store.latest(), null);
+});
+
+test("normalization failure is distinct from quota reader failure", async () => {
+  const taskGuardHome = await mkdtemp(path.join(os.tmpdir(), "task-guard-snapshot-normalize-"));
+  const store = new QuotaSnapshotStore({
+    taskGuardHome,
+    reader: async () => ({ source: "test_fixture", observed_at: "invalid" }),
+  });
+
+  const snapshot = await store.refresh();
+
+  assert.equal(snapshot.freshness, "UNAVAILABLE");
+  assert.equal(snapshot.error.code, "QUOTA_NORMALIZATION_FAILED");
+});
+
 test("an authoritative observation keeps a missing five-hour window unavailable", async () => {
   const taskGuardHome = await mkdtemp(path.join(os.tmpdir(), "task-guard-snapshot-missing-"));
   const store = new QuotaSnapshotStore({
