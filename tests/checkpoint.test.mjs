@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -69,7 +69,7 @@ test("saves a readable project checkpoint and minimal global registry entry", as
 
   const restored = await readCheckpoint(saved.checkpoint_path);
   assert.equal(restored.task_id, "task-24");
-  assert.equal(restored.repository.project_path, projectPath);
+  assert.equal(restored.repository.project_path, await realpath(projectPath));
 });
 
 test("save reports recoverable success when the derived registry write fails", async () => {
