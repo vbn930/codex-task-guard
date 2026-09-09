@@ -25,6 +25,11 @@ import {
   withRegistryLock,
   writeRegistry,
 } from "./task-registry.mjs";
+import {
+  TASK_STATUS,
+  isActiveTaskStatus,
+  normalizeTaskStatus,
+} from "./task-state-contract.mjs";
 
 const STATE_START = "<!-- TASK_GUARD_STATE_START";
 const STATE_END = "TASK_GUARD_STATE_END -->";
@@ -90,10 +95,12 @@ function validateState(state) {
   }
   if (!state.task_description?.trim()) throw new Error("task_description is required");
   if (!state.status?.trim()) throw new Error("status is required");
+  const status = normalizeTaskStatus(state.status);
   if (!Array.isArray(state.exact_next_actions) || state.exact_next_actions.length === 0) {
     throw new Error("exact_next_actions must contain at least one action");
   }
   rejectSensitiveCheckpointKeys(state);
+  return status;
 }
 
 function rejectSensitiveCheckpointKeys(value, currentPath = "", seen = new WeakSet()) {
@@ -129,12 +136,13 @@ export async function saveCheckpoint({
   taskGuardHome = defaultTaskGuardHome(),
   registryWriter = writeRegistry,
 }) {
-  validateState(state);
+  const status = validateState(state);
   const repository = await repositorySnapshot(projectPath);
   const checkpointPath = checkpointPathForRoot(repository.project_path);
   const now = new Date().toISOString();
   const fullState = {
     ...state,
+    status,
     schema_version: 2,
     paused_at: state.paused_at ?? now,
     repository,
@@ -153,7 +161,7 @@ export async function saveCheckpoint({
     if (
       checkpointOwner
       && checkpointOwner.task_id !== state.task_id
-      && ["working", "paused_for_quota"].includes(checkpointOwner.status?.toLowerCase())
+      && isActiveTaskStatus(checkpointOwner.status)
     ) {
       throw new Error(
         `ACTIVE_CHECKPOINT_EXISTS: repository already has active task ${checkpointOwner.task_id}`,
@@ -310,7 +318,7 @@ export async function patchCheckpointResumeAutomation({
     if (state.task_id !== taskId) {
       throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
     }
-    if (state.status?.toUpperCase() !== "PAUSED_FOR_QUOTA") {
+    if (normalizeTaskStatus(state.status) !== TASK_STATUS.PAUSED_FOR_QUOTA) {
       throw new Error("resumeAutomation can only be finalized from PAUSED_FOR_QUOTA");
     }
     if (isTerminalAutomation(state.resume_automation)) {
@@ -442,7 +450,7 @@ export async function resumeTask({
     if (state.task_id !== taskId) {
       throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
     }
-    if (state.status?.toUpperCase() === "WORKING") {
+    if (normalizeTaskStatus(state.status) === TASK_STATUS.WORKING) {
       result = {
         checkpoint_path: checkpointPath,
         status: "already_resumed",
@@ -450,7 +458,7 @@ export async function resumeTask({
       };
       return;
     }
-    if (state.status?.toUpperCase() !== "PAUSED_FOR_QUOTA") {
+    if (normalizeTaskStatus(state.status) !== TASK_STATUS.PAUSED_FOR_QUOTA) {
       throw new Error("Task can only resume from PAUSED_FOR_QUOTA");
     }
     if (repositoryVerification?.matches !== true) {
@@ -466,7 +474,7 @@ export async function resumeTask({
     const now = new Date().toISOString();
     const resumedState = {
       ...state,
-      status: "WORKING",
+      status: TASK_STATUS.WORKING,
       resumed_at: now,
       resume_after: null,
       ...(isVerifiedAutomation(state.resume_automation) ? {

@@ -72,6 +72,40 @@ test("saves a readable project checkpoint and minimal global registry entry", as
   assert.equal(restored.repository.project_path, await realpath(projectPath));
 });
 
+test("save normalizes legacy task status casing before persistence", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-status-normalization",
+      task_description: "Normalize task status",
+      status: "paused_for_quota",
+      exact_next_actions: ["Resume after reset"],
+    },
+  });
+
+  assert.equal((await readCheckpoint(saved.checkpoint_path)).status, "PAUSED_FOR_QUOTA");
+});
+
+test("save rejects status values outside the durable task contract", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+
+  await assert.rejects(
+    saveCheckpoint({
+      projectPath,
+      taskGuardHome,
+      state: {
+        task_id: "task-invalid-status",
+        task_description: "Reject an invalid task status",
+        status: "BLOCKED",
+        exact_next_actions: ["Use a supported task status"],
+      },
+    }),
+    /Invalid task status/,
+  );
+});
+
 test("save reports recoverable success when the derived registry write fails", async () => {
   const { projectPath, taskGuardHome } = await createProject();
 
