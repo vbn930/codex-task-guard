@@ -1,21 +1,4 @@
-import { execFile, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import {
-  access,
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  readlink,
-  rename,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
-import { createReadStream } from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { promisify } from "node:util";
+import { access, readFile, rm } from "node:fs/promises";
 
 import {
   AUTOMATION_STATUS,
@@ -23,151 +6,31 @@ import {
   isVerifiedAutomation,
   sanitizeResumeAutomation,
 } from "./automation-contract.mjs";
+import { atomicWriteText } from "./fs-safe.mjs";
+import {
+  canonicalProjectIdentity,
+  checkpointPathForRoot,
+  ensureLocalGitExclude,
+  repositorySnapshot,
+  resolveProjectCheckpointPath,
+  resolveProjectRoot,
+  verifyRepositoryState,
+} from "./repository-state.mjs";
+import { defaultTaskGuardHome } from "./runtime-paths.mjs";
+import {
+  repairRegistryEntry,
+  registryEntryFromCheckpoint,
+  registryKey,
+  updateDerivedRegistry,
+  withRegistryLock,
+  writeRegistry,
+} from "./task-registry.mjs";
 
-const execFileAsync = promisify(execFile);
-const CHECKPOINT_RELATIVE_PATH = path.join(".codex", "task-guard-checkpoint.md");
 const STATE_START = "<!-- TASK_GUARD_STATE_START";
 const STATE_END = "TASK_GUARD_STATE_END -->";
 const STATE_ENCODING = "base64:";
 
-function defaultTaskGuardHome() {
-  const codexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
-  return process.env.TASK_GUARD_HOME ?? path.join(codexHome, "task-guard");
-}
-
-async function atomicWrite(filePath, content) {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(tempPath, content, "utf8");
-  await rename(tempPath, filePath);
-}
-
-async function withRegistryLock(taskGuardHome, operation) {
-  await mkdir(taskGuardHome, { recursive: true });
-  const lockPath = path.join(taskGuardHome, "index.lock");
-  const deadline = Date.now() + 10_000;
-  let handle;
-  while (!handle) {
-    try {
-      handle = await open(lockPath, "wx");
-      await handle.writeFile(`${process.pid}\n`, "utf8");
-    } catch (error) {
-      const windowsLockContention = process.platform === "win32"
-        && ["EACCES", "EPERM"].includes(error.code);
-      if (error.code !== "EEXIST" && !windowsLockContention) throw error;
-      const metadata = await stat(lockPath).catch(() => null);
-      if (metadata && Date.now() - metadata.mtimeMs > 60_000) {
-        await rm(lockPath, { force: true });
-        continue;
-      }
-      if (Date.now() >= deadline) throw new Error("Timed out waiting for the task registry lock");
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-
-  try {
-    return await operation();
-  } finally {
-    await handle.close();
-    await rm(lockPath, { force: true });
-  }
-}
-
-async function git(projectPath, args, { allowFailure = false } = {}) {
-  try {
-    const result = await execFileAsync("git", args, {
-      cwd: projectPath,
-      encoding: "buffer",
-      maxBuffer: 32 * 1024 * 1024,
-      windowsHide: true,
-    });
-    return result.stdout;
-  } catch (error) {
-    if (allowFailure) return null;
-    throw new Error(`Git command failed: git ${args.join(" ")}`);
-  }
-}
-
-async function hashGitOutput(hash, projectPath, args) {
-  await new Promise((resolve, reject) => {
-    const child = spawn("git", args, {
-      cwd: projectPath,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    child.stdout.on("data", (chunk) => hash.update(chunk));
-    child.on("error", () => reject(new Error(`Git command failed: git ${args.join(" ")}`)));
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`Git command failed: git ${args.join(" ")}`));
-    });
-  });
-}
-
-async function hashFile(hash, filePath, relativePath) {
-  const metadata = await lstat(filePath);
-  if (metadata.isSymbolicLink()) {
-    const target = await readlink(filePath);
-    hash.update(`untracked-symlink:${relativePath}:${target}`);
-    return;
-  }
-  hash.update(`untracked:${relativePath}:${metadata.size}:`);
-  await new Promise((resolve, reject) => {
-    const stream = createReadStream(filePath);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", reject);
-    stream.on("end", resolve);
-  });
-}
-
-async function repositorySnapshot(projectPath) {
-  const rootBuffer = await git(projectPath, ["rev-parse", "--show-toplevel"]);
-  const root = path.resolve(rootBuffer.toString("utf8").trim());
-  const hash = createHash("sha256");
-  const head = await git(root, ["rev-parse", "HEAD"], { allowFailure: true });
-  const status = await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-  const untracked = await git(root, ["ls-files", "--others", "--exclude-standard", "-z"]);
-
-  hash.update(head ?? Buffer.from("UNBORN"));
-  hash.update(status);
-  await hashGitOutput(hash, root, ["diff", "--cached", "--binary", "--no-ext-diff"]);
-  await hashGitOutput(hash, root, ["diff", "--binary", "--no-ext-diff"]);
-  const untrackedPaths = untracked
-    .toString("utf8")
-    .split("\0")
-    .filter(Boolean)
-    .sort();
-  for (const relativePath of untrackedPaths) {
-    await hashFile(hash, path.join(root, relativePath), relativePath);
-  }
-
-  return {
-    project_path: root,
-    head: head?.toString("utf8").trim() || null,
-    fingerprint: hash.digest("hex"),
-    status_porcelain: status.toString("utf8").replaceAll("\0", "\n").trim(),
-  };
-}
-
-async function ensureLocalGitExclude(projectPath) {
-  const excludeBuffer = await git(projectPath, ["rev-parse", "--git-path", "info/exclude"]);
-  const excludeRaw = excludeBuffer.toString("utf8").trim();
-  const excludePath = path.isAbsolute(excludeRaw)
-    ? excludeRaw
-    : path.resolve(projectPath, excludeRaw);
-  await mkdir(path.dirname(excludePath), { recursive: true });
-  let existing = "";
-  try {
-    existing = await readFile(excludePath, "utf8");
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
-  const rule = "/.codex/task-guard-checkpoint.md";
-  if (!existing.split(/\r?\n/).includes(rule)) {
-    const separator = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-    await atomicWrite(excludePath, `${existing}${separator}${rule}\n`);
-  }
-}
+export { auditRegistry, listRegistry } from "./task-registry.mjs";
 
 function listSection(title, values) {
   const items = Array.isArray(values) ? values : [];
@@ -260,101 +123,6 @@ function rejectSensitiveCheckpointKeys(value, currentPath = "", seen = new WeakS
   }
 }
 
-function registryKey(projectPath, taskId) {
-  const prefix = createHash("sha256").update(projectPath.toLowerCase()).digest("hex").slice(0, 12);
-  return `${prefix}:${taskId}`;
-}
-
-function registryEntryFromCheckpoint({ state, root, checkpointPath, updatedAt }) {
-  const entry = {
-    task_id: state.task_id,
-    project_path: root,
-    checkpoint_path: checkpointPath,
-    status: state.status.toLowerCase(),
-    resume_after: state.resume_after ?? null,
-    thread_reference: state.thread_reference ?? null,
-    updated_at: updatedAt,
-  };
-  if (state.quota_snapshot) {
-    entry.quota_snapshot_id = state.quota_snapshot.snapshot_id ?? null;
-    entry.quota_observed_at = state.quota_snapshot.observed_at ?? null;
-  }
-  if (state.resume_automation) {
-    entry.resume_mode = (state.resume_mode ?? "MANUAL").toLowerCase();
-    entry.resume_automation_status = state.resume_automation.status.toLowerCase();
-  }
-  if (state.heartbeat_automation_id) {
-    entry.heartbeat_automation_id = state.heartbeat_automation_id;
-  }
-  return entry;
-}
-
-export async function listRegistry({ taskGuardHome = defaultTaskGuardHome() } = {}) {
-  const registryPath = path.join(taskGuardHome, "index.json");
-  try {
-    return JSON.parse(await readFile(registryPath, "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT") return { schema_version: 1, tasks: {} };
-    throw error;
-  }
-}
-
-export async function auditRegistry({ taskGuardHome = defaultTaskGuardHome() } = {}) {
-  const registry = await listRegistry({ taskGuardHome });
-  const audited = { ...registry, tasks: {} };
-  for (const [key, entry] of Object.entries(registry.tasks)) {
-    try {
-      await access(entry.checkpoint_path);
-      audited.tasks[key] = { ...entry, stale: false, stale_reason: null };
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-      audited.tasks[key] = {
-        ...entry,
-        stale: true,
-        stale_reason: "CHECKPOINT_MISSING",
-      };
-    }
-  }
-  return audited;
-}
-
-async function writeRegistry(taskGuardHome, registry) {
-  const current = { ...registry, schema_version: 2 };
-  await atomicWrite(path.join(taskGuardHome, "index.json"), `${JSON.stringify(current, null, 2)}\n`);
-}
-
-async function updateDerivedRegistry({
-  taskGuardHome,
-  registryWriter,
-  mutate,
-  failureMessage = "Checkpoint updated; derived registry repair is required",
-}) {
-  try {
-    const registry = await listRegistry({ taskGuardHome });
-    mutate(registry);
-    await registryWriter(taskGuardHome, registry);
-    return null;
-  } catch {
-    return {
-      code: "REGISTRY_UPDATE_FAILED",
-      message: failureMessage,
-    };
-  }
-}
-
-async function readRegistryForRepair(taskGuardHome) {
-  try {
-    const registry = await listRegistry({ taskGuardHome });
-    if (!registry.tasks || typeof registry.tasks !== "object" || Array.isArray(registry.tasks)) {
-      throw new SyntaxError("Task registry structure is invalid");
-    }
-    return registry;
-  } catch (error) {
-    if (error instanceof SyntaxError) return { schema_version: 2, tasks: {} };
-    throw error;
-  }
-}
-
 export async function saveCheckpoint({
   projectPath,
   state,
@@ -362,8 +130,8 @@ export async function saveCheckpoint({
   registryWriter = writeRegistry,
 }) {
   validateState(state);
-  const repository = await repositorySnapshot(path.resolve(projectPath));
-  const checkpointPath = path.join(repository.project_path, CHECKPOINT_RELATIVE_PATH);
+  const repository = await repositorySnapshot(projectPath);
+  const checkpointPath = checkpointPathForRoot(repository.project_path);
   const now = new Date().toISOString();
   const fullState = {
     ...state,
@@ -392,16 +160,17 @@ export async function saveCheckpoint({
       );
     }
 
-    await atomicWrite(checkpointPath, renderCheckpoint(fullState));
+    await atomicWriteText(checkpointPath, renderCheckpoint(fullState));
     registryError = await updateDerivedRegistry({
       taskGuardHome,
       registryWriter,
       mutate: (registry) => {
-        const projectKey = repository.project_path.toLowerCase();
+        const projectKey = canonicalProjectIdentity(repository.project_path);
         for (const [key, entry] of Object.entries(registry.tasks)) {
           if (
             entry.task_id !== state.task_id
-            && entry.project_path?.toLowerCase() === projectKey
+            && entry.project_path
+            && canonicalProjectIdentity(entry.project_path) === projectKey
           ) {
             delete registry.tasks[key];
           }
@@ -450,8 +219,7 @@ export async function readCheckpoint(checkpointPath) {
 }
 
 export async function resolveCheckpointPath(projectPath) {
-  const rootBuffer = await git(path.resolve(projectPath), ["rev-parse", "--show-toplevel"]);
-  return path.join(path.resolve(rootBuffer.toString("utf8").trim()), CHECKPOINT_RELATIVE_PATH);
+  return resolveProjectCheckpointPath(projectPath);
 }
 
 async function patchCheckpointHeartbeat({
@@ -461,9 +229,8 @@ async function patchCheckpointHeartbeat({
   taskGuardHome = defaultTaskGuardHome(),
   registryWriter = writeRegistry,
 }) {
-  const rootBuffer = await git(path.resolve(projectPath), ["rev-parse", "--show-toplevel"]);
-  const root = path.resolve(rootBuffer.toString("utf8").trim());
-  const checkpointPath = path.join(root, CHECKPOINT_RELATIVE_PATH);
+  const root = await resolveProjectRoot(projectPath);
+  const checkpointPath = checkpointPathForRoot(root);
   const now = new Date().toISOString();
   let heartbeatAutomationId = null;
   let registryError = null;
@@ -476,7 +243,7 @@ async function patchCheckpointHeartbeat({
     const patchedState = { ...state };
     if (automationId === null) delete patchedState.heartbeat_automation_id;
     else patchedState.heartbeat_automation_id = automationId;
-    await atomicWrite(checkpointPath, renderCheckpoint(patchedState));
+    await atomicWriteText(checkpointPath, renderCheckpoint(patchedState));
 
     registryError = await updateDerivedRegistry({
       taskGuardHome,
@@ -529,9 +296,8 @@ export async function patchCheckpointResumeAutomation({
   allowVerified = false,
   registryWriter = writeRegistry,
 }) {
-  const rootBuffer = await git(path.resolve(projectPath), ["rev-parse", "--show-toplevel"]);
-  const root = path.resolve(rootBuffer.toString("utf8").trim());
-  const checkpointPath = path.join(root, CHECKPOINT_RELATIVE_PATH);
+  const root = await resolveProjectRoot(projectPath);
+  const checkpointPath = checkpointPathForRoot(root);
   const automation = sanitizeResumeAutomation(resumeAutomation);
   if (isVerifiedAutomation(automation) && !allowVerified) {
     throw new Error("VERIFIED automation must be derived by pause finalize read-back verification");
@@ -587,7 +353,7 @@ export async function patchCheckpointResumeAutomation({
     };
     if (automation.automation_id) patchedState.heartbeat_automation_id = automation.automation_id;
     else delete patchedState.heartbeat_automation_id;
-    await atomicWrite(checkpointPath, renderCheckpoint(patchedState));
+    await atomicWriteText(checkpointPath, renderCheckpoint(patchedState));
     registryError = await updateDerivedRegistry({
       taskGuardHome,
       registryWriter,
@@ -631,24 +397,20 @@ export async function repairCheckpointRegistry({
   taskGuardHome = defaultTaskGuardHome(),
   registryWriter = writeRegistry,
 }) {
-  const rootBuffer = await git(path.resolve(projectPath), ["rev-parse", "--show-toplevel"]);
-  const root = path.resolve(rootBuffer.toString("utf8").trim());
-  const checkpointPath = path.join(root, CHECKPOINT_RELATIVE_PATH);
+  const root = await resolveProjectRoot(projectPath);
+  const checkpointPath = checkpointPathForRoot(root);
   await withRegistryLock(taskGuardHome, async () => {
     const state = await readCheckpoint(checkpointPath);
     if (state.task_id !== taskId) {
       throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
     }
-    const now = new Date().toISOString();
-    const registry = await readRegistryForRepair(taskGuardHome);
-    const key = registryKey(root, taskId);
-    registry.tasks[key] = registryEntryFromCheckpoint({
+    await repairRegistryEntry({
+      taskGuardHome,
       state,
       root,
       checkpointPath,
-      updatedAt: now,
+      registryWriter,
     });
-    await registryWriter(taskGuardHome, registry);
   });
   return {
     checkpoint_path: checkpointPath,
@@ -660,17 +422,8 @@ export async function repairCheckpointRegistry({
 
 export async function verifyCheckpoint(checkpointPath) {
   const state = await readCheckpoint(checkpointPath);
-  const current = await repositorySnapshot(state.repository.project_path);
-  if (current.fingerprint !== state.repository.fingerprint) {
-    return {
-      matches: false,
-      reason: "REPOSITORY_STATE_CHANGED",
-      checkpoint_fingerprint: state.repository.fingerprint,
-      current_fingerprint: current.fingerprint,
-      current_status: current.status_porcelain,
-    };
-  }
-  return { matches: true, reason: null, state };
+  const verification = await verifyRepositoryState(state.repository);
+  return verification.matches ? { ...verification, state } : verification;
 }
 
 export async function resumeTask({
@@ -681,9 +434,8 @@ export async function resumeTask({
   heartbeatCleanupConfirmed = false,
   registryWriter = writeRegistry,
 }) {
-  const rootBuffer = await git(path.resolve(projectPath), ["rev-parse", "--show-toplevel"]);
-  const root = path.resolve(rootBuffer.toString("utf8").trim());
-  const checkpointPath = path.join(root, CHECKPOINT_RELATIVE_PATH);
+  const root = await resolveProjectRoot(projectPath);
+  const checkpointPath = checkpointPathForRoot(root);
   let result;
   await withRegistryLock(taskGuardHome, async () => {
     const state = await readCheckpoint(checkpointPath);
@@ -727,7 +479,7 @@ export async function resumeTask({
       } : {}),
     };
     delete resumedState.heartbeat_automation_id;
-    await atomicWrite(checkpointPath, renderCheckpoint(resumedState));
+    await atomicWriteText(checkpointPath, renderCheckpoint(resumedState));
     const registryError = await updateDerivedRegistry({
       taskGuardHome,
       registryWriter,
@@ -770,9 +522,8 @@ export async function completeTask({
   taskGuardHome = defaultTaskGuardHome(),
   registryWriter = writeRegistry,
 }) {
-  const rootBuffer = await git(path.resolve(projectPath), ["rev-parse", "--show-toplevel"]);
-  const root = path.resolve(rootBuffer.toString("utf8").trim());
-  const checkpointPath = path.join(root, CHECKPOINT_RELATIVE_PATH);
+  const root = await resolveProjectRoot(projectPath);
+  const checkpointPath = checkpointPathForRoot(root);
   let checkpointRemoved = false;
   let registryError = null;
 

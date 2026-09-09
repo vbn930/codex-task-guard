@@ -5,12 +5,13 @@ import {
   open,
   readFile,
   rm,
-  stat,
 } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 
+import { withFileLock } from "./fs-safe.mjs";
 import { validateFreshness } from "./quota-snapshot.mjs";
+import { canonicalProjectIdentity, resolveProjectRoot } from "./repository-state.mjs";
+import { defaultTaskGuardHome } from "./runtime-paths.mjs";
 
 const REQUIRED_METADATA = ["task_id", "phase_id", "phase_type", "model", "reasoning_effort"];
 const OPTIONAL_METADATA = [
@@ -20,11 +21,6 @@ const OPTIONAL_METADATA = [
   "expected_files_touched",
   "tool_profile",
 ];
-
-function defaultTaskGuardHome() {
-  const codexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
-  return process.env.TASK_GUARD_HOME ?? path.join(codexHome, "task-guard");
-}
 
 function timestamp(now) {
   const value = now();
@@ -62,40 +58,14 @@ function normalizeMetadata(metadata) {
 }
 
 function activePhasePath(projectPath, taskGuardHome) {
-  const projectKey = createHash("sha256").update(path.resolve(projectPath)).digest("hex");
+  const projectKey = createHash("sha256").update(canonicalProjectIdentity(projectPath)).digest("hex");
   return path.join(taskGuardHome, "active-phases", `${projectKey}.json`);
 }
 
-async function withFileLock(lockPath, operation) {
-  await mkdir(path.dirname(lockPath), { recursive: true });
-  const deadline = Date.now() + 5_000;
-  let handle;
-  while (!handle) {
-    try {
-      handle = await open(lockPath, "wx");
-    } catch (error) {
-      const windowsLockContention = process.platform === "win32"
-        && ["EACCES", "EPERM"].includes(error.code);
-      if (error.code !== "EEXIST" && !windowsLockContention) throw error;
-      const metadata = await stat(lockPath).catch(() => null);
-      if (metadata && Date.now() - metadata.mtimeMs > 30_000) {
-        await rm(lockPath, { force: true });
-        continue;
-      }
-      if (Date.now() >= deadline) throw new Error("Timed out waiting for the usage history lock");
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-  try {
-    return await operation();
-  } finally {
-    await handle.close();
-    await rm(lockPath, { force: true });
-  }
-}
-
 async function withHistoryLock(taskGuardHome, operation) {
-  return withFileLock(path.join(taskGuardHome, "usage-history.lock"), operation);
+  return withFileLock(path.join(taskGuardHome, "usage-history.lock"), operation, {
+    timeoutMessage: "Timed out waiting for the usage history lock",
+  });
 }
 
 export async function startPhase({
@@ -105,11 +75,11 @@ export async function startPhase({
   taskGuardHome = defaultTaskGuardHome(),
   now = () => new Date(),
 }) {
-  const projectRoot = path.resolve(projectPath);
   const normalized = normalizeMetadata(metadata);
   const authoritative = requireSnapshot(snapshot);
   const quota = authoritative.five_hour;
   const startedAt = timestamp(now);
+  const projectRoot = await resolveProjectRoot(projectPath, { allowNonGit: true });
   const state = {
     ...normalized,
     project_path: projectRoot,
@@ -157,7 +127,8 @@ export async function completePhase({
   if (![true, false, null].includes(concurrentUsage)) {
     throw new Error("concurrentUsage must be true, false, or null");
   }
-  const statePath = activePhasePath(projectPath, taskGuardHome);
+  const projectRoot = await resolveProjectRoot(projectPath, { allowNonGit: true });
+  const statePath = activePhasePath(projectRoot, taskGuardHome);
   return withFileLock(`${statePath}.lock`, () => completePhaseLocked({
     statePath,
     phaseId,
@@ -165,7 +136,7 @@ export async function completePhase({
     snapshot,
     taskGuardHome,
     now,
-  }));
+  }), { timeoutMessage: "Timed out waiting for the usage history lock" });
 }
 
 async function completePhaseLocked({

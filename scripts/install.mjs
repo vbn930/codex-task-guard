@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
-import { cp, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { atomicWriteText } from "./lib/fs-safe.mjs";
 
 const POLICY_START = "<!-- TASK-GUARD POLICY START -->";
 const POLICY_END = "<!-- TASK-GUARD POLICY END -->";
@@ -12,13 +14,6 @@ For substantial tasks, use $task-guard before starting the task and before each 
 
 Treat one task as one thread-level goal and decompose it into dependency-aware phases. Use JIT authoritative quota snapshots at critical boundaries; never present cached quota as current. Measure before/after snapshots, use measured history to select work that fits, and keep checkpoint, Discord, and automation reset scheduling on the same pause snapshot. A quota reset is a pause/resume boundary, not a task boundary. Finish only after the original acceptance criteria and required tests pass; start the next task in a new thread.
 ${POLICY_END}`;
-
-async function atomicWrite(filePath, content) {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tempPath, content, "utf8");
-  await rename(tempPath, filePath);
-}
 
 function withPolicy(existing) {
   const start = existing.indexOf(POLICY_START);
@@ -58,7 +53,7 @@ export async function installSkill({
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
-  await atomicWrite(agentsPath, withPolicy(existing));
+  await atomicWriteText(agentsPath, withPolicy(existing));
   return { skill_path: skillPath, global_instructions: agentsPath };
 }
 

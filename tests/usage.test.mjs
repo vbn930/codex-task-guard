@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import {
   completePhase,
@@ -11,6 +13,8 @@ import {
   readUsageHistory,
   startPhase,
 } from "../scripts/lib/usage.mjs";
+
+const execFileAsync = promisify(execFile);
 
 function authoritativeSnapshot(
   remaining,
@@ -76,6 +80,39 @@ test("phase history preserves authoritative before and after snapshot metadata",
   assert.equal(completed.external_usage_possible, false);
   assert.equal(completed.quota_before_snapshot_id, before.snapshot_id);
   assert.equal(completed.quota_after_snapshot_id, after.snapshot_id);
+});
+
+test("active phase identity uses the Git root from any repository subdirectory", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-usage-root-"));
+  const projectPath = path.join(root, "project");
+  const subdirectory = path.join(projectPath, "packages", "worker");
+  const taskGuardHome = path.join(root, "global");
+  await mkdir(subdirectory, { recursive: true });
+  await execFileAsync("git", ["init"], { cwd: projectPath, windowsHide: true });
+
+  await startPhase({
+    projectPath: subdirectory,
+    taskGuardHome,
+    metadata: {
+      task_id: "task-root",
+      phase_id: "implementation",
+      phase_type: "implementation",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+    },
+    snapshot: authoritativeSnapshot(45, "2026-08-31T01:00:00.000Z"),
+  });
+
+  const completed = await completePhase({
+    projectPath,
+    taskGuardHome,
+    phaseId: "implementation",
+    concurrentUsage: false,
+    snapshot: authoritativeSnapshot(40, "2026-08-31T01:10:00.000Z"),
+  });
+
+  assert.equal(completed.project, path.basename(projectPath));
+  assert.equal(completed.quota_delta, 5);
 });
 
 test("records measured phase usage without storing source contents", async () => {

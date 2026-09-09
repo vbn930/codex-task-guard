@@ -1,15 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { readRateLimits } from "./app-server.mjs";
+import { atomicWriteText } from "./fs-safe.mjs";
 import { normalizeQuotaResponse } from "./quota.mjs";
-
-function defaultTaskGuardHome() {
-  const codexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
-  return process.env.TASK_GUARD_HOME ?? path.join(codexHome, "task-guard");
-}
+import { defaultTaskGuardHome } from "./runtime-paths.mjs";
 
 function unavailableWindow() {
   return { available: false };
@@ -79,13 +75,6 @@ function asAuthoritativeSnapshot(observation) {
   return snapshot;
 }
 
-async function atomicWrite(filePath, content) {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporaryPath, content, "utf8");
-  await rename(temporaryPath, filePath);
-}
-
 export class QuotaSnapshotStore {
   constructor({
     taskGuardHome = defaultTaskGuardHome(),
@@ -127,7 +116,7 @@ export class QuotaSnapshotStore {
 
   async record(snapshot) {
     const authoritative = asAuthoritativeSnapshot(snapshot);
-    await atomicWrite(this.snapshotPath, `${JSON.stringify(authoritative, null, 2)}\n`);
+    await atomicWriteText(this.snapshotPath, `${JSON.stringify(authoritative, null, 2)}\n`);
     return authoritative;
   }
 }
