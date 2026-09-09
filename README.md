@@ -144,4 +144,8 @@ Delete `%CODEX_HOME%\skills\task-guard` (or `%USERPROFILE%\.codex\skills\task-gu
 - Percentage-point deltas can include shared-pool activity. Only samples explicitly marked as having no concurrent usage are eligible for automatic estimates.
 - Checkpoint projects must be Git repositories.
 
+## License
+
+This project is not distributed under an open-source license. No `LICENSE` file is provided.
+
 Research evidence and runtime tradeoffs are recorded in [docs/research.md](docs/research.md).
