@@ -76,10 +76,6 @@ export async function prepareTaskResume({
   phases,
   safetyReservePercent,
 }) {
-  if (!snapshotStore || typeof snapshotStore.refresh !== "function") {
-    throw new Error("Quota snapshot store is required");
-  }
-  const snapshot = validateFreshness(await snapshotStore.refresh());
   const checkpointPath = await resolveCheckpointPath(projectPath);
   const state = await readCheckpoint(checkpointPath);
   if (state.task_id !== taskId) {
@@ -88,7 +84,7 @@ export async function prepareTaskResume({
   if (state.status?.toUpperCase() === "WORKING") {
     return {
       status: "ALREADY_RESUMED",
-      snapshot,
+      snapshot: null,
       verification: null,
       heartbeat_cleanup: {
         required: false,
@@ -102,7 +98,7 @@ export async function prepareTaskResume({
   if (state.status?.toUpperCase() !== "PAUSED_FOR_QUOTA") {
     return {
       status: "TASK_BLOCKED",
-      snapshot,
+      snapshot: null,
       verification: { matches: false, reason: "INVALID_RESUME_STATE" },
       heartbeat_cleanup: { required: false, completed: false },
       resume: null,
@@ -126,11 +122,38 @@ export async function prepareTaskResume({
     );
     return {
       status: "TASK_BLOCKED",
-      snapshot,
+      snapshot: null,
       verification,
       heartbeat_cleanup: { required: false, completed: false },
       resume: null,
       notification,
+    };
+  }
+  if (!snapshotStore || typeof snapshotStore.refresh !== "function") {
+    throw new Error("Quota snapshot store is required");
+  }
+  const verifiedCleanupRequired = state.resume_automation?.status === "VERIFIED"
+    && state.resume_automation.cleanup_required !== false;
+  const cleanupRequired = Boolean(state.heartbeat_automation_id) || verifiedCleanupRequired;
+  const cleanupAutomationId = state.heartbeat_automation_id
+    ?? (verifiedCleanupRequired ? state.resume_automation?.automation_id : null);
+  let snapshot;
+  try {
+    snapshot = validateFreshness(await snapshotStore.refresh());
+  } catch {
+    snapshot = unavailableQuotaSnapshot();
+    return {
+      status: "QUOTA_UNAVAILABLE",
+      snapshot,
+      verification,
+      heartbeat_cleanup: {
+        required: cleanupRequired,
+        completed: false,
+        automation_id: cleanupAutomationId,
+        reason: "QUOTA_UNAVAILABLE",
+      },
+      resume: null,
+      notification: null,
     };
   }
   const decision = phases
@@ -141,11 +164,6 @@ export async function prepareTaskResume({
       safetyReservePercent,
     })
     : null;
-  const verifiedCleanupRequired = state.resume_automation?.status === "VERIFIED"
-    && state.resume_automation.cleanup_required !== false;
-  const cleanupRequired = Boolean(state.heartbeat_automation_id) || verifiedCleanupRequired;
-  const cleanupAutomationId = state.heartbeat_automation_id
-    ?? (verifiedCleanupRequired ? state.resume_automation?.automation_id : null);
   let heartbeatCleanup = {
     required: cleanupRequired,
     completed: !cleanupRequired,

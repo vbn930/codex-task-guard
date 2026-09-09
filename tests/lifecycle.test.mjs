@@ -757,6 +757,59 @@ test("invalid optional budget input cannot partially resume or clean up", async 
   assert.equal(notificationCalls, 0);
 });
 
+test("paused resume reports quota unavailable without cleanup or transition", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-resume-quota-unavailable-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  execFileSync("git", ["init", "-q", projectPath]);
+  const saved = await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "resume-quota-unavailable",
+      task_description: "Remain paused without authoritative quota",
+      status: "PAUSED_FOR_QUOTA",
+      heartbeat_automation_id: "automation-still-active",
+      exact_next_actions: ["Retry quota refresh"],
+    },
+  });
+  let cleanupCalls = 0;
+  let notificationCalls = 0;
+
+  const result = await prepareTaskResume({
+    projectPath,
+    taskGuardHome,
+    taskId: "resume-quota-unavailable",
+    snapshotStore: {
+      refresh: async () => {
+        throw new Error("quota reader unavailable");
+      },
+    },
+    cleanupHeartbeat: async () => {
+      cleanupCalls += 1;
+      return true;
+    },
+    notifyOptions: {
+      env: { CODEX_DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/secret" },
+      fetchImpl: async () => {
+        notificationCalls += 1;
+        return { ok: true, status: 204 };
+      },
+    },
+  });
+
+  const checkpoint = await readCheckpoint(saved.checkpoint_path);
+  assert.equal(result.status, "QUOTA_UNAVAILABLE");
+  assert.equal(result.snapshot.freshness, "UNAVAILABLE");
+  assert.equal(result.heartbeat_cleanup.reason, "QUOTA_UNAVAILABLE");
+  assert.equal(result.resume, null);
+  assert.equal(result.notification, null);
+  assert.equal(cleanupCalls, 0);
+  assert.equal(notificationCalls, 0);
+  assert.equal(checkpoint.status, "PAUSED_FOR_QUOTA");
+  assert.equal(checkpoint.heartbeat_automation_id, "automation-still-active");
+});
+
 test("duplicate resume wake is idempotent and emits no second side effects", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-resume-idempotent-"));
   const projectPath = path.join(root, "project");
@@ -780,12 +833,17 @@ test("duplicate resume wake is idempotent and emits no second side effects", asy
   });
   let cleanupCalls = 0;
   let notificationCalls = 0;
+  let refreshReads = 0;
   const options = {
     projectPath,
     taskGuardHome,
     taskId: "resume-idempotent-task",
     snapshotStore: {
-      refresh: async () => snapshot(100, "2026-08-31T12:31:00.000Z"),
+      refresh: async () => {
+        refreshReads += 1;
+        if (refreshReads > 1) throw new Error("quota temporarily unavailable");
+        return snapshot(100, "2026-08-31T12:31:00.000Z");
+      },
     },
     cleanupHeartbeat: async () => {
       cleanupCalls += 1;
@@ -812,6 +870,7 @@ test("duplicate resume wake is idempotent and emits no second side effects", asy
   assert.equal(second.notification, null);
   assert.equal(cleanupCalls, 1);
   assert.equal(notificationCalls, 1);
+  assert.equal(refreshReads, 1);
   assert.equal(afterFirst.resume_automation.status, "EXECUTED");
   assert.deepEqual(afterSecond, afterFirst);
 });
@@ -916,7 +975,7 @@ test("task resume blocks without a working transition when repository verificati
 
   const checkpoint = await readCheckpoint(saved.checkpoint_path);
   const [registryEntry] = Object.values((await listRegistry({ taskGuardHome })).tasks);
-  assert.equal(refreshReads, 1);
+  assert.equal(refreshReads, 0);
   assert.equal(cleaned, false);
   assert.equal(result.status, "TASK_BLOCKED");
   assert.equal(result.resume, null);
