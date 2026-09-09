@@ -10,6 +10,11 @@ import {
   buildResumeAutomationIntent,
   verifyAutomationTranscript,
 } from "./automation.mjs";
+import {
+  AUTOMATION_RESOLUTION,
+  AUTOMATION_STATUS,
+  isVerifiedAutomation,
+} from "./automation-contract.mjs";
 import { notifyDiscord } from "./discord.mjs";
 import {
   unavailableQuotaSnapshot,
@@ -132,7 +137,7 @@ export async function prepareTaskResume({
   if (!snapshotStore || typeof snapshotStore.refresh !== "function") {
     throw new Error("Quota snapshot store is required");
   }
-  const verifiedCleanupRequired = state.resume_automation?.status === "VERIFIED"
+  const verifiedCleanupRequired = isVerifiedAutomation(state.resume_automation)
     && state.resume_automation.cleanup_required !== false;
   const cleanupRequired = Boolean(state.heartbeat_automation_id) || verifiedCleanupRequired;
   const cleanupAutomationId = state.heartbeat_automation_id
@@ -362,7 +367,7 @@ export async function prepareQuotaPause({
     resume_mode: automationEligible ? "AUTOMATION_ELIGIBLE" : "MANUAL",
     resume_automation: automationEligible ? {
       purpose: "quota_resume",
-      status: "ELIGIBLE",
+      status: AUTOMATION_STATUS.ELIGIBLE,
       automation_id: null,
       attempts: 0,
       target_thread: targetThread,
@@ -371,11 +376,11 @@ export async function prepareQuotaPause({
       automation_fingerprint: automationIntent.automation_fingerprint,
     } : {
       purpose: "quota_resume",
-      status: "FAILED",
+      status: AUTOMATION_STATUS.FAILED,
       automation_id: null,
       attempts: 0,
       last_error: automationScheduleError,
-      resolution: "MANUAL_FALLBACK",
+      resolution: AUTOMATION_RESOLUTION.MANUAL_FALLBACK,
     },
   };
   const savedCheckpoint = await saveCheckpoint({ projectPath, state, taskGuardHome });
@@ -447,9 +452,7 @@ export async function finalizeQuotaPause({
     allowVerified: true,
   });
   const finalizedAutomation = checkpoint.resume_automation;
-  const verified = finalizedAutomation.status === "VERIFIED";
-  const creationUnverified = ["UI_RENDERED", "CREATE_REQUESTED", "RECONCILING"]
-    .includes(finalizedAutomation.status);
+  const verified = isVerifiedAutomation(finalizedAutomation);
   const notification = await notifyDiscord(
     "QUOTA_PAUSED",
     {
@@ -457,9 +460,7 @@ export async function finalizeQuotaPause({
       checkpoint: "Saved",
       resume: verified
         ? "Same-thread automation verified"
-        : creationUnverified
-          ? "Creation not persisted/verified"
-          : "Manual resume required",
+        : "Manual resume required",
       automation: verified
         ? `Verified · Attempt ${finalizedAutomation.attempts}/2`
         : "Registration could not be verified",

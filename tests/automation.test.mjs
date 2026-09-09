@@ -11,6 +11,34 @@ import {
   verifyAutomationTranscript,
   verifyPersistedAutomation,
 } from "../scripts/lib/automation.mjs";
+import {
+  AUTOMATION_RESOLUTION,
+  AUTOMATION_STATUS,
+  AUTOMATION_TRACE_EVENT,
+  isAutomationStatus,
+  isTerminalAutomation,
+  sanitizeResumeAutomation,
+} from "../scripts/lib/automation-contract.mjs";
+
+test("automation contract separates durable status trace events and resolution", () => {
+  assert.deepEqual(Object.values(AUTOMATION_STATUS), [
+    "ELIGIBLE",
+    "VERIFIED",
+    "FAILED",
+    "EXECUTED",
+  ]);
+  assert.equal(AUTOMATION_TRACE_EVENT.CREATE_REQUESTED, "CREATE_REQUESTED");
+  assert.equal(AUTOMATION_RESOLUTION.MANUAL_FALLBACK, "MANUAL_FALLBACK");
+  assert.equal(isAutomationStatus("VERIFIED"), true);
+  assert.equal(isAutomationStatus("CREATE_REQUESTED"), false);
+  assert.equal(isAutomationStatus("MANUAL_FALLBACK"), false);
+  assert.equal(isTerminalAutomation({ status: "VERIFIED" }), true);
+  assert.equal(isTerminalAutomation({ status: "ELIGIBLE" }), false);
+  assert.throws(() => sanitizeResumeAutomation({
+    purpose: "quota_resume",
+    status: "CREATE_REQUESTED",
+  }), /Invalid resumeAutomation status/);
+});
 
 function intent() {
   return buildResumeAutomationIntent({
@@ -363,6 +391,9 @@ test("an ambiguous create timeout reconciles before any possible retry", async (
   assert.equal(result.status, "FAILED");
   assert.deepEqual(events, ["create", "reconcile"]);
   assert.equal(result.attempts, 1);
+  assert.equal(result.state_trace.some((event, index) => (
+    index > 0 && event === result.state_trace[index - 1]
+  )), false);
 });
 
 test("a structural heartbeat capability failure uses manual fallback without retry", async () => {

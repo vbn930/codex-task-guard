@@ -3,24 +3,19 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-export const RESUME_AUTOMATION_STATES = Object.freeze({
-  ELIGIBLE: "ELIGIBLE",
-  CREATE_REQUESTED: "CREATE_REQUESTED",
-  ID_RECEIVED: "ID_RECEIVED",
-  UI_RENDERED: "UI_RENDERED",
-  READBACK_VERIFYING: "READBACK_VERIFYING",
-  PERSISTED: "PERSISTED",
-  VERIFIED: "VERIFIED",
-  RECONCILING: "RECONCILING",
-  RETRYING: "RETRYING",
-  MISMATCH: "MISMATCH",
-  FAILED: "FAILED",
-  MANUAL_FALLBACK: "MANUAL_FALLBACK",
-});
+import {
+  AUTOMATION_RESOLUTION,
+  AUTOMATION_STATUS,
+  AUTOMATION_TRACE_EVENT,
+} from "./automation-contract.mjs";
 
 const DEFAULT_MAX_CREATE_ATTEMPTS = 2;
 const DEFAULT_MAX_VIEW_ATTEMPTS = 3;
 const DEFAULT_VIEW_BACKOFF_MS = [250, 750];
+
+function pushTraceEvent(trace, event) {
+  if (trace.at(-1) !== event) trace.push(event);
+}
 
 function fingerprint(parts) {
   return createHash("sha256").update(parts.join("\u0000")).digest("hex");
@@ -282,14 +277,13 @@ export function verifyPersistedAutomation(raw, expected, requestedId) {
 async function verifyById({ id, expected, adapter, maxViewAttempts, delay, trace }) {
   let lastCheck = null;
   for (let attempt = 1; attempt <= maxViewAttempts; attempt += 1) {
-    trace.push(RESUME_AUTOMATION_STATES.READBACK_VERIFYING);
+    pushTraceEvent(trace, AUTOMATION_TRACE_EVENT.READBACK_VERIFYING);
     try {
       const raw = await adapter.view({ id, mode: "view" });
       const checked = verifyPersistedAutomation(raw, expected, id);
       if (checked.actual.found) {
-        trace.push(RESUME_AUTOMATION_STATES.PERSISTED);
-        if (checked.verified) trace.push(RESUME_AUTOMATION_STATES.VERIFIED);
-        else trace.push(RESUME_AUTOMATION_STATES.MISMATCH);
+        pushTraceEvent(trace, AUTOMATION_TRACE_EVENT.PERSISTED);
+        if (!checked.verified) pushTraceEvent(trace, AUTOMATION_TRACE_EVENT.MISMATCH);
         return checked;
       }
       lastCheck = checked;
@@ -332,7 +326,7 @@ async function verifyById({ id, expected, adapter, maxViewAttempts, delay, trace
 function verifiedResult({ id, attempts, expected, checked, trace }) {
   return {
     purpose: expected.purpose,
-    status: RESUME_AUTOMATION_STATES.VERIFIED,
+    status: AUTOMATION_STATUS.VERIFIED,
     resume_mode: "AUTOMATION",
     automation_id: id,
     attempts,
@@ -369,7 +363,7 @@ function isStructuralFailure(error) {
 
 async function reconcileSafely(adapter, expected, trace) {
   if (typeof adapter.reconcile !== "function") return { outcome: "UNAVAILABLE" };
-  trace.push(RESUME_AUTOMATION_STATES.RECONCILING);
+  pushTraceEvent(trace, AUTOMATION_TRACE_EVENT.RECONCILING);
   try {
     return await adapter.reconcile(expected);
   } catch {
@@ -387,12 +381,12 @@ export async function ensureResumeAutomation({
   if (!adapter || typeof adapter.create !== "function" || typeof adapter.view !== "function") {
     throw new Error("Automation adapter requires create and view functions");
   }
-  const trace = [RESUME_AUTOMATION_STATES.ELIGIBLE];
+  const trace = [];
   let lastAutomationId = null;
   let lastCheck = null;
   let terminalError = null;
   for (let attempts = 1; attempts <= maxCreateAttempts; attempts += 1) {
-    trace.push(RESUME_AUTOMATION_STATES.CREATE_REQUESTED);
+    pushTraceEvent(trace, AUTOMATION_TRACE_EVENT.CREATE_REQUESTED);
     let parsed;
     try {
       parsed = parseCreateResult(await adapter.create(expected));
@@ -408,9 +402,9 @@ export async function ensureResumeAutomation({
       break;
     }
     if (parsed.outcome !== "ID_RECEIVED") {
-      trace.push(parsed.outcome === "UI_RENDERED"
-        ? RESUME_AUTOMATION_STATES.UI_RENDERED
-        : RESUME_AUTOMATION_STATES.RECONCILING);
+      pushTraceEvent(trace, parsed.outcome === "UI_RENDERED"
+        ? AUTOMATION_TRACE_EVENT.UI_RENDERED
+        : AUTOMATION_TRACE_EVENT.RECONCILING);
       terminalError = parsed.outcome === "UI_RENDERED"
         ? "UI_RENDERED_NOT_PERSISTED"
         : "AMBIGUOUS_CREATE";
@@ -444,7 +438,7 @@ export async function ensureResumeAutomation({
       break;
     }
     lastAutomationId = parsed.automation_id;
-    trace.push(RESUME_AUTOMATION_STATES.ID_RECEIVED);
+    pushTraceEvent(trace, AUTOMATION_TRACE_EVENT.ID_RECEIVED);
     const checked = await verifyById({
       id: parsed.automation_id,
       expected,
@@ -496,7 +490,7 @@ export async function ensureResumeAutomation({
         break;
       }
       if (reconciliation?.outcome === "ABSENT" && attempts < maxCreateAttempts) {
-        trace.push(RESUME_AUTOMATION_STATES.RETRYING);
+        pushTraceEvent(trace, AUTOMATION_TRACE_EVENT.RETRYING);
         continue;
       }
     } else if ([
@@ -509,15 +503,14 @@ export async function ensureResumeAutomation({
     }
     break;
   }
-  trace.push(RESUME_AUTOMATION_STATES.FAILED, RESUME_AUTOMATION_STATES.MANUAL_FALLBACK);
   return {
     purpose: expected.purpose,
-    status: RESUME_AUTOMATION_STATES.FAILED,
+    status: AUTOMATION_STATUS.FAILED,
     resume_mode: "MANUAL",
     automation_id: lastCheck?.actual?.found ? lastAutomationId : null,
-    attempts: trace.filter((state) => state === RESUME_AUTOMATION_STATES.CREATE_REQUESTED).length,
+    attempts: trace.filter((state) => state === AUTOMATION_TRACE_EVENT.CREATE_REQUESTED).length,
     last_error: terminalError ?? mismatchReason(lastCheck),
-    resolution: RESUME_AUTOMATION_STATES.MANUAL_FALLBACK,
+    resolution: AUTOMATION_RESOLUTION.MANUAL_FALLBACK,
     cleanup_required: Boolean(lastCheck?.actual?.found),
     target_thread: expected.target_thread,
     resume_after: expected.resume_after,
