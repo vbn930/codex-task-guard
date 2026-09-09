@@ -4,6 +4,12 @@ All notable changes to Codex Task Guard are documented here.
 
 ## Unreleased
 
+### Changed
+
+- Added bounded, cohort-aware usage history retention with atomic compaction.
+- Switched sufficiently measured cohorts from permanent observed maximum to recent P90 plus a one-point safety margin.
+- Kept internal budget decisions independent from the `history list` display limit.
+
 ## 0.2.0 - 2026-09-09
 
 ### Added

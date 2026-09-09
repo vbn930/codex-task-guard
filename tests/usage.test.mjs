@@ -251,6 +251,64 @@ test("estimates a conservative phase cost from high-confidence exact-cohort hist
   });
 });
 
+test("uses a conservative recent percentile once a cohort has enough samples", () => {
+  const cohort = {
+    model: "gpt-5.6-sol",
+    reasoning_effort: "high",
+    phase_type: "implementation",
+    plan: "plus",
+  };
+  const history = [90, ...Array.from({ length: 19 }, (_, index) => index + 1)]
+    .map((quotaDelta) => ({
+      ...cohort,
+      quota_delta: quotaDelta,
+      measurement_confidence: "HIGH_CONFIDENCE",
+      reset_occurred: false,
+    }));
+
+  assert.deepEqual(estimatePhaseCost({ history, phase: cohort }), {
+    status: "AVAILABLE",
+    cohort,
+    sample_count: 20,
+    sample_window: 20,
+    minimum_cost: 1,
+    median_cost: 10.5,
+    estimated_upper_cost: 19,
+    percentile: 90,
+    method: "recent_p90_plus_one",
+  });
+});
+
+test("recent percentile ignores samples older than the latest fifty", () => {
+  const cohort = {
+    model: "gpt-5.6-sol",
+    reasoning_effort: "high",
+    phase_type: "implementation",
+    plan: "plus",
+  };
+  const history = [
+    ...Array.from({ length: 10 }, () => 99),
+    ...Array.from({ length: 50 }, (_, index) => index + 1),
+  ].map((quotaDelta) => ({
+    ...cohort,
+    quota_delta: quotaDelta,
+    reset_occurred: false,
+    measurement_confidence: "HIGH_CONFIDENCE",
+  }));
+
+  assert.deepEqual(estimatePhaseCost({ history, phase: cohort }), {
+    status: "AVAILABLE",
+    cohort,
+    sample_count: 60,
+    sample_window: 50,
+    minimum_cost: 1,
+    median_cost: 25.5,
+    estimated_upper_cost: 46,
+    percentile: 90,
+    method: "recent_p90_plus_one",
+  });
+});
+
 test("selects the first dependency-ready phase whose observed upper cost fits the budget", () => {
   const base = {
     model: "gpt-5.6-sol",
@@ -549,4 +607,80 @@ test("usage history rejects a corrupted middle JSONL record", async () => {
     readUsageHistory({ taskGuardHome }),
     /HISTORY_CORRUPTED: invalid JSONL record at line 2/,
   );
+});
+
+test("internal history reads keep every retained cohort while explicit limits stay recent", async () => {
+  const taskGuardHome = await mkdtemp(path.join(os.tmpdir(), "task-guard-history-limit-"));
+  const records = Array.from({ length: 600 }, (_, index) => ({
+    task_id: `task-${index}`,
+    phase_id: "phase",
+    started_at: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+  }));
+  await writeFile(
+    path.join(taskGuardHome, "usage-history.jsonl"),
+    `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+    "utf8",
+  );
+
+  assert.equal((await readUsageHistory({ taskGuardHome })).length, 600);
+  assert.deepEqual(
+    (await readUsageHistory({ taskGuardHome, limit: 2 })).map(({ task_id: taskId }) => taskId),
+    ["task-598", "task-599"],
+  );
+});
+
+test("phase completion compacts history without evicting a rare cohort", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-history-retention-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  await mkdir(projectPath);
+  const record = (index, phaseType) => ({
+    schema_version: 2,
+    phase_run_id: `run-${index}`,
+    task_id: `task-${index}`,
+    phase_id: "phase",
+    phase_type: phaseType,
+    model: "gpt-5.6-sol",
+    reasoning_effort: "high",
+    plan: "plus",
+    started_at: new Date(Date.UTC(2026, 0, 1, 0, 0, index % 60)).toISOString(),
+    quota_delta: 1,
+    reset_occurred: false,
+    measurement_confidence: "HIGH_CONFIDENCE",
+  });
+  const existing = Array.from({ length: 2_500 }, (_, index) => (
+    record(index, index < 25 ? "rare" : "common")
+  ));
+  await mkdir(taskGuardHome);
+  await writeFile(
+    path.join(taskGuardHome, "usage-history.jsonl"),
+    `${existing.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+    "utf8",
+  );
+  await startPhase({
+    projectPath,
+    taskGuardHome,
+    metadata: {
+      task_id: "current-task",
+      phase_id: "current-phase",
+      phase_type: "common",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+      plan: "plus",
+    },
+    snapshot: authoritativeSnapshot(60, "2026-08-31T01:00:00.000Z"),
+  });
+
+  const completed = await completePhase({
+    projectPath,
+    taskGuardHome,
+    phaseId: "current-phase",
+    concurrentUsage: false,
+    snapshot: authoritativeSnapshot(55, "2026-08-31T01:10:00.000Z"),
+  });
+  const retained = await readUsageHistory({ taskGuardHome });
+
+  assert.equal(retained.length, 2_000);
+  assert.equal(retained.filter(({ phase_type: phaseType }) => phaseType === "rare").length, 25);
+  assert.equal(retained.at(-1).phase_run_id, completed.phase_run_id);
 });

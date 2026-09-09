@@ -21,6 +21,12 @@ const OPTIONAL_METADATA = [
   "expected_files_touched",
   "tool_profile",
 ];
+const RECENT_ESTIMATE_MIN_SAMPLES = 20;
+const RECENT_ESTIMATE_WINDOW = 50;
+const RECENT_ESTIMATE_PERCENTILE = 90;
+const HISTORY_COMPACT_AT = 2_500;
+const HISTORY_RETAINED_RECORDS = 2_000;
+const HISTORY_RECORDS_PER_COHORT = 50;
 
 function timestamp(now) {
   const value = now();
@@ -162,7 +168,8 @@ async function completePhaseLocked({
   const phaseRunId = state.phase_run_id ?? legacyPhaseRunId(state);
   const existingRecord = await withHistoryLock(taskGuardHome, async () => {
     const history = await loadAndRepairUsageHistory(taskGuardHome);
-    return history.records.find((record) => record.phase_run_id === phaseRunId) ?? null;
+    const records = await compactHistoryIfNeeded(history);
+    return records.find((record) => record.phase_run_id === phaseRunId) ?? null;
   });
   if (existingRecord) {
     await activeStateRemover(statePath, { force: true });
@@ -241,6 +248,10 @@ async function completePhaseLocked({
         `${JSON.stringify(record)}\n`,
         "utf8",
       );
+      await compactHistoryIfNeeded({
+        ...history,
+        records: [...history.records, record],
+      });
       committedRecord = record;
     }
   });
@@ -318,11 +329,55 @@ async function loadAndRepairUsageHistory(taskGuardHome) {
   return history;
 }
 
+function usageCohortKey(record) {
+  return JSON.stringify([
+    record.plan ?? null,
+    record.model ?? null,
+    record.reasoning_effort ?? null,
+    record.phase_type ?? null,
+  ]);
+}
+
+function retainedUsageRecords(records) {
+  if (records.length <= HISTORY_COMPACT_AT) return records;
+  const selected = new Set();
+  const cohortCounts = new Map();
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const cohort = usageCohortKey(records[index]);
+    const count = cohortCounts.get(cohort) ?? 0;
+    if (count < HISTORY_RECORDS_PER_COHORT) {
+      selected.add(index);
+      cohortCounts.set(cohort, count + 1);
+    }
+  }
+  for (let index = records.length - 1;
+    index >= 0 && selected.size < HISTORY_RETAINED_RECORDS;
+    index -= 1) {
+    selected.add(index);
+  }
+  return [...selected]
+    .sort((left, right) => left - right)
+    .slice(-HISTORY_RETAINED_RECORDS)
+    .map((index) => records[index]);
+}
+
+async function compactHistoryIfNeeded(history) {
+  const retained = retainedUsageRecords(history.records);
+  if (retained.length === history.records.length) return retained;
+  await atomicWriteText(
+    history.historyPath,
+    `${retained.map((record) => JSON.stringify(record)).join("\n")}\n`,
+  );
+  return retained;
+}
+
 export async function readUsageHistory({
   taskGuardHome = defaultTaskGuardHome(),
-  limit = 500,
+  limit = null,
 } = {}) {
   const { records } = await loadUsageHistory(taskGuardHome);
+  if (limit === null) return records;
+  if (!Number.isInteger(limit) || limit < 1) throw new Error("limit must be a positive integer");
   return records.slice(-limit);
 }
 
@@ -352,7 +407,7 @@ export function estimatePhaseCost({ history, phase }) {
       method: "none",
     };
   }
-  const costs = history
+  const eligibleCosts = history
     .map((record) => normalizeUsageRecord(record))
     .filter((record) => (
       record.measurement_confidence === "HIGH_CONFIDENCE"
@@ -364,10 +419,9 @@ export function estimatePhaseCost({ history, phase }) {
       && record.phase_type === cohort.phase_type
       && record.plan === cohort.plan
     ))
-    .map((record) => record.quota_delta)
-    .sort((left, right) => left - right);
+    .map((record) => record.quota_delta);
 
-  if (costs.length === 0) {
+  if (eligibleCosts.length === 0) {
     return {
       status: "INSUFFICIENT_HISTORY",
       cohort,
@@ -376,10 +430,29 @@ export function estimatePhaseCost({ history, phase }) {
       method: "none",
     };
   }
+  const useRecentPercentile = eligibleCosts.length >= RECENT_ESTIMATE_MIN_SAMPLES;
+  const costs = (useRecentPercentile
+    ? eligibleCosts.slice(-RECENT_ESTIMATE_WINDOW)
+    : eligibleCosts
+  ).sort((left, right) => left - right);
   const middle = Math.floor(costs.length / 2);
   const median = costs.length % 2 === 0
     ? (costs[middle - 1] + costs[middle]) / 2
     : costs[middle];
+  if (useRecentPercentile) {
+    const percentileIndex = Math.ceil((RECENT_ESTIMATE_PERCENTILE / 100) * costs.length) - 1;
+    return {
+      status: "AVAILABLE",
+      cohort,
+      sample_count: eligibleCosts.length,
+      sample_window: costs.length,
+      minimum_cost: costs[0],
+      median_cost: median,
+      estimated_upper_cost: Math.min(100, costs[percentileIndex] + 1),
+      percentile: RECENT_ESTIMATE_PERCENTILE,
+      method: "recent_p90_plus_one",
+    };
+  }
   return {
     status: "AVAILABLE",
     cohort,

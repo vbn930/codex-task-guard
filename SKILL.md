@@ -39,7 +39,7 @@ Each candidate passed to `phase prepare` must include the start metadata: `task_
 
 Finish the phase at a coherent boundary. When more work remains, prefer `phase finish --project <project> --phase-id <id> --input <decision.json>` so one authoritative after snapshot is shared by history, predictor, next-phase decision, and any quota-bearing notification. Use plain `phase complete` only when no immediate budget decision is needed. Use `concurrent_usage: false` only when no other shared-pool work ran.
 
-The estimator matches exact plan/model/reasoning/phase-type cohorts and uses the highest valid observed delta as its conservative V1 upper cost. It does not extrapolate across models or plans, apply official message ranges as task-cost formulas, or use an invented percentile. After every completed phase, re-evaluate the pending phases against the newly observed quota.
+The estimator matches exact plan/model/reasoning/phase-type cohorts. Fewer than 20 valid samples use the highest observed delta. At 20 samples, it uses nearest-rank P90 from the latest 50 valid samples plus one percentage point. The ledger compacts after 2,500 records to at most 2,000, prioritizing the latest 50 records per exact cohort. It does not extrapolate across models or plans or apply official message ranges as task-cost formulas. After every completed phase, re-evaluate the pending phases against the newly observed quota.
 
 ## Pause for quota
 

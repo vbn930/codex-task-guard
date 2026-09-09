@@ -84,7 +84,9 @@ Every read is wrapped as a timestamped quota snapshot with `source`, `observed_a
 
 The task remains the thread-level goal. The agent decomposes it into dependency-aware phases. `phase prepare` is the default start boundary: it performs one JIT refresh, evaluates the budget, and records only the selected phase start from that same snapshot. A no-fit decision creates no active phase. `phase start` and `budget evaluate` remain manual diagnostics. `phase finish` is the completion boundary: it performs one JIT refresh, records the after measurement, evaluates the next phases, and optionally builds a Discord notification from that same snapshot. Usage records use schema v2 and a stable `phase_run_id`, so retrying after a committed measurement cannot append a duplicate. Measurements include before/after snapshot IDs, sources, observation times, reset identity, and concurrency quality; they contain no source contents or repository paths.
 
-V1 estimates only an exact plan/model/reasoning/phase-type cohort. Samples are excluded when a reset crossed the phase, concurrent usage occurred or is unknown, or the integer quota reading did not move. The conservative estimate is the highest valid observed percentage-point delta. With no valid cohort, Task Guard returns `INSUFFICIENT_HISTORY` instead of inventing a cost. Both `phase prepare` and diagnostic `budget evaluate` subtract the caller-provided safety reserve from live five-hour quota and select the first dependency-ready phase whose observed upper cost fits.
+The estimator uses only an exact plan/model/reasoning/phase-type cohort. Samples are excluded when a reset crossed the phase, concurrent usage occurred or is unknown, or the integer quota reading did not move. Cohorts with fewer than 20 valid samples use the highest observed percentage-point delta. At 20 samples, the policy switches to the nearest-rank P90 from the latest 50 valid samples plus a one-point safety margin. With no valid cohort, Task Guard returns `INSUFFICIENT_HISTORY` instead of inventing a cost. Both `phase prepare` and diagnostic `budget evaluate` subtract the caller-provided safety reserve from live five-hour quota and select the first dependency-ready phase whose observed upper cost fits.
+
+Internal budget decisions read every retained record; `history list` applies its display limit separately. The ledger compacts only after 2,500 records, retaining at most 2,000 records while prioritizing the latest 50 records from each exact cohort. Compaction runs under the history lock and replaces the JSONL file atomically.
 
 ## Checkpoint and resume
 
@@ -140,7 +142,7 @@ Delete `%CODEX_HOME%\skills\task-guard` (or `%USERPROFILE%\.codex\skills\task-gu
 - App-server startup can take tens of seconds on the first read.
 - The current implementation uses process-per-boundary JIT reads. Persistent app-server monitoring and `account/rateLimits/updated` subscription are future optimizations.
 - `UNKNOWN` quota requires human/agent judgment about whether to continue; the utility does not apply a blind percentage threshold.
-- Cold-start cohorts return `INSUFFICIENT_HISTORY`; V1 intentionally has no fixed model multiplier, percentile, automatic model switching, or cross-cohort extrapolation.
+- Cold-start cohorts return `INSUFFICIENT_HISTORY`; the estimator has no fixed model multiplier, automatic model switching, or cross-cohort extrapolation.
 - Percentage-point deltas can include shared-pool activity. Only samples explicitly marked as having no concurrent usage are eligible for automatic estimates.
 - Checkpoint projects must be Git repositories.
 
