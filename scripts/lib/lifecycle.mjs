@@ -28,6 +28,10 @@ import {
   startPhase,
   validateBudgetInput,
 } from "./usage.mjs";
+import {
+  TASK_RESUME_MODE,
+  transitionTaskToQuotaPause,
+} from "./task-state-contract.mjs";
 
 function sameThreadResumePrompt() {
   return [
@@ -352,20 +356,10 @@ export async function prepareQuotaPause({
     })
     : null;
 
-  const state = {
-    ...checkpointState,
-    quota_snapshot: snapshot,
-    quota: {
-      source: snapshot.source,
-      observed_at: snapshot.observed_at,
-      freshness: snapshot.freshness,
-      five_hour: snapshot.five_hour,
-      weekly: snapshot.weekly,
-    },
-    resume_after: resumeAfter,
-    thread_reference: targetThread,
-    resume_mode: automationEligible ? "AUTOMATION_ELIGIBLE" : "MANUAL",
-    resume_automation: automationEligible ? {
+  const resumeMode = automationEligible
+    ? TASK_RESUME_MODE.AUTOMATION_ELIGIBLE
+    : TASK_RESUME_MODE.MANUAL;
+  const resumeAutomation = automationEligible ? {
       purpose: "quota_resume",
       status: AUTOMATION_STATUS.ELIGIBLE,
       automation_id: null,
@@ -381,8 +375,14 @@ export async function prepareQuotaPause({
       attempts: 0,
       last_error: automationScheduleError,
       resolution: AUTOMATION_RESOLUTION.MANUAL_FALLBACK,
-    },
-  };
+    };
+  const state = transitionTaskToQuotaPause(checkpointState, {
+    snapshot,
+    resumeAfter,
+    threadReference: targetThread,
+    resumeMode,
+    resumeAutomation,
+  });
   const savedCheckpoint = await saveCheckpoint({ projectPath, state, taskGuardHome });
   const checkpoint = { ...savedCheckpoint, saved: true };
   const notification = automationEligible ? null : await notifyDiscord(
@@ -407,7 +407,7 @@ export async function prepareQuotaPause({
       quota_observed_at: snapshot.observed_at,
     } : null,
     automation_schedule_error: automationScheduleError,
-    resume_mode: automationEligible ? "AUTOMATION_ELIGIBLE" : "MANUAL",
+    resume_mode: resumeMode,
   };
 }
 

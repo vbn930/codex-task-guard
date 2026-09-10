@@ -1,7 +1,6 @@
 import { access, readFile, rm } from "node:fs/promises";
 
 import {
-  AUTOMATION_STATUS,
   isTerminalAutomation,
   isVerifiedAutomation,
   sanitizeResumeAutomation,
@@ -29,6 +28,7 @@ import {
   TASK_STATUS,
   isActiveTaskStatus,
   normalizeTaskStatus,
+  transitionTaskToWorking,
 } from "./task-state-contract.mjs";
 
 const STATE_START = "<!-- TASK_GUARD_STATE_START";
@@ -464,29 +464,11 @@ export async function resumeTask({
     if (repositoryVerification?.matches !== true) {
       throw new Error("Repository verification is required before resume");
     }
-    const externalCleanupRequired = Boolean(state.heartbeat_automation_id)
-      || (isVerifiedAutomation(state.resume_automation)
-        && state.resume_automation.cleanup_required !== false);
-    if (externalCleanupRequired && heartbeatCleanupConfirmed !== true) {
-      throw new Error("Heartbeat cleanup confirmation is required before resume");
-    }
-
     const now = new Date().toISOString();
-    const resumedState = {
-      ...state,
-      status: TASK_STATUS.WORKING,
-      resumed_at: now,
-      resume_after: null,
-      ...(isVerifiedAutomation(state.resume_automation) ? {
-        resume_automation: {
-          ...state.resume_automation,
-          status: AUTOMATION_STATUS.EXECUTED,
-          executed_at: now,
-          cleanup_required: false,
-        },
-      } : {}),
-    };
-    delete resumedState.heartbeat_automation_id;
+    const resumedState = transitionTaskToWorking(state, {
+      resumedAt: now,
+      heartbeatCleanupConfirmed,
+    });
     await atomicWriteText(checkpointPath, renderCheckpoint(resumedState));
     const registryError = await updateDerivedRegistry({
       taskGuardHome,
