@@ -6,6 +6,21 @@ Use a temporary JSON file or `--input -`. Do not store secrets in either payload
 
 Required fields are `task_id`, `task_description`, `status`, and at least one `exact_next_actions` entry. Use `PAUSED_FOR_QUOTA` for quota pauses.
 
+Checkpoint input uses an explicit durable-field allowlist. Unknown top-level fields are rejected instead of being silently persisted. The accepted caller fields are:
+
+```text
+task_id                 task_description        status
+completed               current_state           decisions
+tests                   known_issues            remaining_work
+exact_next_actions      pause_reason            quota
+quota_snapshot          resume_after            thread_reference
+resume_mode             resume_automation       heartbeat_automation_id
+schema_version          paused_at               resumed_at
+repository
+```
+
+`schema_version`, `paused_at`, and `repository` are generated or refreshed by `checkpoint save`, but remain accepted so a checkpoint returned by `checkpoint show` can be safely re-saved. Supported durable task statuses are `WORKING` and `PAUSED_FOR_QUOTA`; legacy casing is normalized on write. Unsupported statuses and fields fail before repository state is written. Credential-like keys and raw automation evidence remain recursively forbidden even when nested inside an allowed field.
+
 ```json
 {
   "task_id": "task-24",
@@ -43,6 +58,8 @@ When the snapshot is authoritative, has a verified 300-minute reset strictly aft
 The utility writes `<project>/.codex/task-guard-checkpoint.md`, adds it to the repository-local Git exclude file, and stores minimal lookup metadata under the Codex home directory.
 
 Only one `WORKING` or `PAUSED_FOR_QUOTA` task may own a repository checkpoint. Saving a different `task_id` while one is active fails with `ACTIVE_CHECKPOINT_EXISTS` and leaves the first checkpoint untouched.
+
+Task-state transitions are defined by one contract. A quota pause records a single matching thread, reset, snapshot, resume mode, and automation tuple. Verified automation cannot be attached when those values differ from the paused intent. Resume requires repository verification and any required heartbeat cleanup confirmation, then performs one local transition that clears heartbeat metadata, changes `VERIFIED` to `EXECUTED`, and sets the task to `WORKING`.
 
 After the agent completes create/view/reconciliation, keep the raw tool results transient and send the operation transcript through stdin to the Node verifier:
 
