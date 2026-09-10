@@ -28,6 +28,7 @@ import {
   isActiveTaskStatus,
   isTaskStatus,
   normalizeTaskStatus,
+  sanitizeTaskState,
   transitionTaskResumeAutomation,
   transitionTaskToWorking,
 } from "./task-state-contract.mjs";
@@ -96,12 +97,11 @@ function validateState(state) {
   }
   if (!state.task_description?.trim()) throw new Error("task_description is required");
   if (!state.status?.trim()) throw new Error("status is required");
-  const status = normalizeTaskStatus(state.status);
   if (!Array.isArray(state.exact_next_actions) || state.exact_next_actions.length === 0) {
     throw new Error("exact_next_actions must contain at least one action");
   }
   rejectSensitiveCheckpointKeys(state);
-  return status;
+  return sanitizeTaskState(state);
 }
 
 function rejectSensitiveCheckpointKeys(value, currentPath = "", seen = new WeakSet()) {
@@ -137,15 +137,14 @@ export async function saveCheckpoint({
   taskGuardHome = defaultTaskGuardHome(),
   registryWriter = writeRegistry,
 }) {
-  const status = validateState(state);
+  const normalizedState = validateState(state);
   const repository = await repositorySnapshot(projectPath);
   const checkpointPath = checkpointPathForRoot(repository.project_path);
   const now = new Date().toISOString();
   const fullState = {
-    ...state,
-    status,
+    ...normalizedState,
     schema_version: 2,
-    paused_at: state.paused_at ?? now,
+    paused_at: normalizedState.paused_at ?? now,
     repository,
   };
 
@@ -161,7 +160,7 @@ export async function saveCheckpoint({
     }
     if (
       checkpointOwner
-      && checkpointOwner.task_id !== state.task_id
+      && checkpointOwner.task_id !== normalizedState.task_id
       && isActiveTaskStatus(checkpointOwner.status)
     ) {
       throw new Error(
@@ -177,14 +176,14 @@ export async function saveCheckpoint({
         const projectKey = canonicalProjectIdentity(repository.project_path);
         for (const [key, entry] of Object.entries(registry.tasks)) {
           if (
-            entry.task_id !== state.task_id
+            entry.task_id !== normalizedState.task_id
             && entry.project_path
             && canonicalProjectIdentity(entry.project_path) === projectKey
           ) {
             delete registry.tasks[key];
           }
         }
-        registry.tasks[registryKey(repository.project_path, state.task_id)]
+        registry.tasks[registryKey(repository.project_path, normalizedState.task_id)]
           = registryEntryFromCheckpoint({
             state: fullState,
             root: repository.project_path,

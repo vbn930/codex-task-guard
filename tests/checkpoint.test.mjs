@@ -106,6 +106,25 @@ test("save rejects status values outside the durable task contract", async () =>
   );
 });
 
+test("save rejects fields outside the durable checkpoint schema", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+
+  await assert.rejects(
+    saveCheckpoint({
+      projectPath,
+      taskGuardHome,
+      state: {
+        task_id: "task-unknown-field",
+        task_description: "Reject an undocumented checkpoint field",
+        status: "PAUSED_FOR_QUOTA",
+        exact_next_actions: ["Use documented checkpoint fields"],
+        notes: ["This field is not part of the durable schema"],
+      },
+    }),
+    /Unsupported checkpoint state field: notes/,
+  );
+});
+
 test("save reports recoverable success when the derived registry write fails", async () => {
   const { projectPath, taskGuardHome } = await createProject();
 

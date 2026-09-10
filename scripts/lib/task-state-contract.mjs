@@ -16,6 +16,30 @@ export const TASK_RESUME_MODE = Object.freeze({
 });
 
 const TASK_STATUSES = new Set(Object.values(TASK_STATUS));
+const DURABLE_TASK_FIELDS = new Set([
+  "task_id",
+  "task_description",
+  "status",
+  "completed",
+  "current_state",
+  "decisions",
+  "tests",
+  "known_issues",
+  "remaining_work",
+  "exact_next_actions",
+  "pause_reason",
+  "quota",
+  "quota_snapshot",
+  "resume_after",
+  "thread_reference",
+  "resume_mode",
+  "resume_automation",
+  "heartbeat_automation_id",
+  "schema_version",
+  "paused_at",
+  "resumed_at",
+  "repository",
+]);
 
 export function normalizeTaskStatus(value) {
   const normalized = typeof value === "string" ? value.trim().toUpperCase() : "";
@@ -37,6 +61,21 @@ export function isActiveTaskStatus(value) {
   } catch {
     return false;
   }
+}
+
+export function sanitizeTaskState(state) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) {
+    throw new Error("Checkpoint state is required");
+  }
+  for (const key of Object.keys(state)) {
+    if (!DURABLE_TASK_FIELDS.has(key)) {
+      throw new Error(`Unsupported checkpoint state field: ${key}`);
+    }
+  }
+  return {
+    ...state,
+    status: normalizeTaskStatus(state.status),
+  };
 }
 
 export function transitionTaskToQuotaPause(state, {
