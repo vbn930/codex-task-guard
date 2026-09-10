@@ -132,6 +132,7 @@ test("records measured phase usage without storing source contents", async () =>
       reasoning_effort: "high",
       plan: "plus",
       context_bucket: "large",
+      estimated_files: 4,
       expected_files_touched: 5,
       tool_profile: "code_test",
     },
@@ -159,6 +160,7 @@ test("records measured phase usage without storing source contents", async () =>
   assert.equal(completed.concurrency_known, true);
   assert.equal(completed.concurrent_usage, false);
   assert.equal(completed.measurement_confidence, "HIGH_CONFIDENCE");
+  assert.equal(completed.estimated_files, 4);
   assert.equal("confidence" in completed, false);
   assert.equal("reset_during_phase" in completed, false);
 
@@ -249,6 +251,60 @@ test("estimates a conservative phase cost from high-confidence exact-cohort hist
     estimated_upper_cost: 12,
     method: "observed_max",
   });
+});
+
+test("estimates a sized phase from the nearest same-cohort size that is not smaller", () => {
+  const cohort = {
+    model: "gpt-5.6-sol",
+    reasoning_effort: "high",
+    phase_type: "implementation",
+    plan: "plus",
+  };
+  const sample = (estimatedFiles, quotaDelta, overrides = {}) => ({
+    ...cohort,
+    estimated_files: estimatedFiles,
+    quota_delta: quotaDelta,
+    measurement_confidence: "HIGH_CONFIDENCE",
+    reset_occurred: false,
+    ...overrides,
+  });
+  const result = estimatePhaseCost({
+    phase: { ...cohort, estimated_files: 3 },
+    history: [
+      sample(2, 40),
+      sample(4, 7),
+      sample(4, 8),
+      sample(6, 9),
+      sample(6, 90, { plan: "pro" }),
+    ],
+  });
+
+  assert.equal(result.status, "AVAILABLE");
+  assert.equal(result.sample_count, 2);
+  assert.equal(result.estimated_upper_cost, 8);
+});
+
+test("does not extrapolate a sized estimate from smaller phases", () => {
+  const phase = {
+    model: "gpt-5.6-sol",
+    reasoning_effort: "high",
+    phase_type: "implementation",
+    plan: "plus",
+    estimated_files: 5,
+  };
+  const result = estimatePhaseCost({
+    phase,
+    history: [{
+      ...phase,
+      estimated_files: 3,
+      quota_delta: 4,
+      measurement_confidence: "HIGH_CONFIDENCE",
+      reset_occurred: false,
+    }],
+  });
+
+  assert.equal(result.status, "INSUFFICIENT_HISTORY");
+  assert.equal(result.sample_count, 0);
 });
 
 test("uses a conservative recent percentile once a cohort has enough samples", () => {

@@ -17,6 +17,10 @@ import {
   setCheckpointHeartbeat,
   verifyCheckpoint,
 } from "../scripts/lib/checkpoint.mjs";
+import {
+  loadOrCreatePhasePlan,
+  readPhasePlan,
+} from "../scripts/lib/phase-planner.mjs";
 
 async function createProject() {
   const root = await mkdtemp(path.join(tmpdir(), "task-guard-checkpoint-"));
@@ -249,6 +253,16 @@ test("detects repository changes made after the checkpoint", async () => {
 
 test("completion removes the active checkpoint and registry entry", async () => {
   const { projectPath, taskGuardHome } = await createProject();
+  await loadOrCreatePhasePlan({
+    projectPath,
+    taskGuardHome,
+    phases: [{
+      task_id: "task-done",
+      phase_id: "delivery",
+      phase_type: "delivery",
+      depends_on: [],
+    }],
+  });
   await saveCheckpoint({
     projectPath,
     taskGuardHome,
@@ -267,6 +281,7 @@ test("completion removes the active checkpoint and registry entry", async () => 
   });
   assert.equal(result.checkpoint_removed, true);
   assert.deepEqual((await listRegistry({ taskGuardHome })).tasks, {});
+  assert.equal(await readPhasePlan({ projectPath, taskGuardHome }), null);
 });
 
 test("completion reports stale derived metadata and retries idempotently", async () => {
@@ -765,6 +780,38 @@ test("heartbeat patch reports a recoverable registry partial write", async () =>
   assert.equal(repaired.registry_updated, true);
   assert.equal(Object.values((await listRegistry({ taskGuardHome })).tasks)[0]
     .heartbeat_automation_id, "automation-recovery");
+});
+
+test("every checkpoint write re-derives the complete registry entry from authoritative state", async () => {
+  const { projectPath, taskGuardHome } = await createProject();
+  await saveCheckpoint({
+    projectPath,
+    taskGuardHome,
+    state: {
+      task_id: "task-derived-write",
+      task_description: "Rebuild derived state on every write",
+      status: "PAUSED_FOR_QUOTA",
+      resume_after: "2027-01-15T08:00:00.000Z",
+      exact_next_actions: ["Continue"],
+    },
+  });
+  const registry = await listRegistry({ taskGuardHome });
+  const [key] = Object.keys(registry.tasks);
+  registry.tasks[key].status = "working";
+  registry.tasks[key].resume_after = null;
+  await writeFile(path.join(taskGuardHome, "index.json"), `${JSON.stringify(registry)}\n`);
+
+  await setCheckpointHeartbeat({
+    projectPath,
+    taskGuardHome,
+    taskId: "task-derived-write",
+    automationId: "automation-derived",
+  });
+
+  const [entry] = Object.values((await listRegistry({ taskGuardHome })).tasks);
+  assert.equal(entry.status, "paused_for_quota");
+  assert.equal(entry.resume_after, "2027-01-15T08:00:00.000Z");
+  assert.equal(entry.heartbeat_automation_id, "automation-derived");
 });
 
 test("registry repair rebuilds the index when its JSON is corrupted", async () => {

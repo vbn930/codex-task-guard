@@ -17,7 +17,7 @@ input.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
     const valid = message.params?.clientInfo?.name === "task_guard"
-      && message.params?.clientInfo?.version === "0.2.0"
+      && message.params?.clientInfo?.version === "0.3.0"
       && message.params?.capabilities?.experimentalApi === true;
     process.stdout.write(JSON.stringify(valid
       ? { jsonrpc: "2.0", id: message.id, result: { serverInfo: { name: "fake" } } }

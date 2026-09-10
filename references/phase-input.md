@@ -12,6 +12,7 @@ Task Guard treats the task as the thread-level goal and phases as dependency-saf
   "plan": "plus",
   "context_bucket": "large",
   "files_before": 8,
+  "estimated_files": 5,
   "expected_files_touched": 5,
   "tool_profile": "code_test"
 }
@@ -49,35 +50,42 @@ node <skill-root>/scripts/task-guard.mjs phase complete --project <project> --ph
 
 `--concurrent-usage` accepts `true`, `false`, or `unknown`. Use `false` only when no other Codex thread, ChatGPT Work task, Workspace Agent, or other shared-pool consumer ran during the measurement. Completion commits one metadata-only schema-v2 record to `%CODEX_HOME%/task-guard/usage-history.jsonl`. Its `phase_run_id` makes completion idempotent if active-state cleanup must be retried.
 
-## Evaluate pending phases
+## Native phase plan
 
 ```json
 {
+  "task_id": "task-24",
   "safety_reserve_percent": 5,
   "phases": [
     {
       "task_id": "task-24",
-      "phase_id": "formatter-implementation",
+      "phase_id": "backend",
       "phase_type": "implementation",
       "plan": "plus",
-      "dependencies_met": true
+      "depends_on": [],
+      "estimated_files": 4
     },
     {
       "task_id": "task-24",
       "phase_id": "integration-tests",
       "phase_type": "testing",
       "plan": "plus",
-      "dependencies_met": false
+      "depends_on": ["backend"],
+      "estimated_files": 2
     }
   ]
 }
 ```
 
+Top-level `task_id`, or a `depends_on` field on any phase, requests native planning. Every phase must then carry the same `task_id`. Task Guard rejects duplicate IDs, unknown dependencies, cycles, and invalid `estimated_files`; persists the full plan under Task Guard home; records completed phase IDs; and derives `READY`, `DEPENDENCY_BLOCKED`, and `COMPLETED` states. Caller-supplied `dependencies_met` is ignored for a native plan. Automatic phase generation from task prose is not implemented.
+
+On `phase finish`, Task Guard marks the active native phase complete and calculates the next ready phase without requiring the caller to resend the graph. A quota checkpoint embeds the native plan, and `resume prepare` restores it only after repository, quota, and automation-cleanup gates pass. `checkpoint complete` removes the persisted plan. Inputs that omit native-plan fields retain the legacy caller-supplied `dependencies_met` behavior.
+
 ```text
 node <skill-root>/scripts/task-guard.mjs phase prepare --project <project> --input <budget.json>
 ```
 
-The command resolves runtime identity first, then reads live quota once, computes `available_budget = remaining_percent - safety_reserve_percent`, and evaluates exact plan/model/reasoning/phase-type cohorts. Fewer than 20 valid samples use the highest observed delta as `estimated_upper_cost`; at 20 samples, the estimator uses nearest-rank P90 from the latest 50 valid samples plus one percentage point. It selects the first dependency-ready phase that fits and records its start from that same quota snapshot. A phase with no valid nonzero samples returns `INSUFFICIENT_HISTORY`; split or deliberately calibrate it instead of inventing a cost. `budget evaluate --input <budget.json>` remains a standalone diagnostic that does not start a phase.
+The command resolves runtime identity first, then reads live quota once, computes `available_budget = remaining_percent - safety_reserve_percent`, and evaluates exact plan/model/reasoning/phase-type cohorts. For a phase with `estimated_files`, it uses the nearest measured file count that is not smaller; smaller samples are never extrapolated upward. Fewer than 20 valid samples use the highest observed delta as `estimated_upper_cost`; at 20 samples, the estimator uses nearest-rank P90 from the latest 50 valid samples plus one percentage point. It selects the first graph-ready phase that fits and records its start from that same quota snapshot. A phase with no valid match returns `INSUFFICIENT_HISTORY`; split or deliberately calibrate it instead of inventing a cost. `budget evaluate --input <budget.json>` remains a standalone diagnostic that does not persist a native plan or start a phase.
 
 When a next-phase decision follows completion, use the same JSON shape plus `"concurrent_usage": "false"` with `phase finish`. It performs one authoritative refresh and returns `snapshot`, `measurement`, and `decision` sharing one `snapshot_id`. History records `quota_before_observed_at`, `quota_after_observed_at`, reset identity, `concurrency_status`, `measurement_confidence`, and `external_usage_possible`. A direct delta is recorded only for a verified identical reset window.
 

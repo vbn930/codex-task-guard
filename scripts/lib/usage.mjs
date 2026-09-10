@@ -18,6 +18,7 @@ const OPTIONAL_METADATA = [
   "plan",
   "context_bucket",
   "files_before",
+  "estimated_files",
   "expected_files_touched",
   "tool_profile",
   "model_source",
@@ -56,7 +57,7 @@ function normalizeMetadata(metadata) {
     const value = metadata[key];
     if (value !== undefined && value !== null && value !== "") normalized[key] = value;
   }
-  for (const key of ["files_before", "expected_files_touched"]) {
+  for (const key of ["files_before", "estimated_files", "expected_files_touched"]) {
     if (normalized[key] !== undefined
       && (!Number.isInteger(normalized[key]) || normalized[key] < 0)) {
       throw new Error(`${key} must be a non-negative integer`);
@@ -400,6 +401,10 @@ export function estimatePhaseCost({ history, phase }) {
   for (const field of ["model", "reasoning_effort", "phase_type"]) {
     requireStringField(phase, field);
   }
+  if (phase.estimated_files !== undefined
+    && (!Number.isInteger(phase.estimated_files) || phase.estimated_files < 0)) {
+    throw new Error("phase.estimated_files must be a non-negative integer");
+  }
   const cohort = {
     model: phase.model,
     reasoning_effort: phase.reasoning_effort,
@@ -415,7 +420,7 @@ export function estimatePhaseCost({ history, phase }) {
       method: "none",
     };
   }
-  const eligibleCosts = history
+  let eligibleRecords = history
     .map((record) => normalizeUsageRecord(record))
     .filter((record) => (
       record.measurement_confidence === "HIGH_CONFIDENCE"
@@ -426,8 +431,16 @@ export function estimatePhaseCost({ history, phase }) {
       && record.reasoning_effort === cohort.reasoning_effort
       && record.phase_type === cohort.phase_type
       && record.plan === cohort.plan
-    ))
-    .map((record) => record.quota_delta);
+    ));
+  if (phase.estimated_files !== undefined) {
+    eligibleRecords = eligibleRecords.filter((record) => (
+      Number.isInteger(record.estimated_files)
+      && record.estimated_files >= phase.estimated_files
+    ));
+    const nearestSize = Math.min(...eligibleRecords.map((record) => record.estimated_files));
+    eligibleRecords = eligibleRecords.filter((record) => record.estimated_files === nearestSize);
+  }
+  const eligibleCosts = eligibleRecords.map((record) => record.quota_delta);
 
   if (eligibleCosts.length === 0) {
     return {

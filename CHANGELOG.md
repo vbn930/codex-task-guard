@@ -4,10 +4,14 @@ All notable changes to Codex Task Guard are documented here.
 
 ## Unreleased
 
+## 0.3.0 - 2026-09-10
+
 ### Added
 
 - Added exact current-thread model and reasoning-effort detection through Codex app-server.
 - Added `runtime identify` for sanitized runtime identity diagnostics.
+- Added persisted native phase graphs with dependency validation, completion tracking, quota-aware ready-phase selection, and checkpoint recovery.
+- Added `estimated_files` measurement metadata and conservative nearest-not-smaller size matching inside exact estimator cohorts.
 
 ### Changed
 
@@ -15,6 +19,8 @@ All notable changes to Codex Task Guard are documented here.
 - Switched sufficiently measured cohorts from permanent observed maximum to recent P90 plus a one-point safety margin.
 - Kept internal budget decisions independent from the `history list` display limit.
 - Made omitted, `auto`, and `unknown` phase runtime fields resolve automatically with fail-closed provenance.
+- Re-derived complete registry entries from the authoritative checkpoint on every save and narrow-patch path.
+- Kept legacy caller-supplied `dependencies_met` inputs backward compatible when no native phase plan is requested.
 
 ## 0.2.0 - 2026-09-09
 

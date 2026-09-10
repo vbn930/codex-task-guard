@@ -27,6 +27,7 @@ const DURABLE_TASK_FIELDS = new Set([
   "known_issues",
   "remaining_work",
   "exact_next_actions",
+  "phase_plan",
   "pause_reason",
   "quota",
   "quota_snapshot",

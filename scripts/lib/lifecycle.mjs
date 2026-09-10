@@ -38,6 +38,12 @@ import {
   readRuntimeIdentity,
   resolvePhasesRuntimeIdentity,
 } from "./runtime-identity.mjs";
+import {
+  completePhasePlan,
+  evaluatePlannedBudget,
+  loadOrCreatePhasePlan,
+  readPhasePlan,
+} from "./phase-planner.mjs";
 
 function sameThreadResumePrompt() {
   return [
@@ -49,7 +55,9 @@ function sameThreadResumePrompt() {
 
 export async function preparePhase({
   projectPath,
+  taskId,
   phases,
+  completedPhaseIds,
   safetyReservePercent,
   snapshotStore,
   taskGuardHome,
@@ -58,18 +66,38 @@ export async function preparePhase({
   if (!snapshotStore || typeof snapshotStore.refresh !== "function") {
     throw new Error("Quota snapshot store is required");
   }
-  const resolvedPhases = await resolvePhasesRuntimeIdentity(phases, {
+  const nativePlanRequested = taskId !== undefined
+    || phases?.some((phase) => Object.hasOwn(phase, "depends_on"));
+  const phasePlan = nativePlanRequested
+    ? await loadOrCreatePhasePlan({
+      projectPath,
+      taskId,
+      phases,
+      completedPhaseIds,
+      taskGuardHome,
+    })
+    : null;
+  const resolvedPhases = await resolvePhasesRuntimeIdentity(phasePlan?.phases ?? phases, {
     reader: runtimeIdentityReader,
   });
   const snapshot = validateFreshness(await snapshotStore.refresh());
-  const decision = evaluateBudget({
-    history: await readUsageHistory({ taskGuardHome }),
-    phases: resolvedPhases,
-    snapshot,
-    safetyReservePercent,
-  });
+  const history = await readUsageHistory({ taskGuardHome });
+  const decision = phasePlan
+    ? evaluatePlannedBudget({
+      history,
+      phases: resolvedPhases,
+      completedPhaseIds: phasePlan.completed_phase_ids,
+      snapshot,
+      safetyReservePercent,
+    })
+    : evaluateBudget({ history, phases: resolvedPhases, snapshot, safetyReservePercent });
   if (!decision.selected_phase_id) {
-    return { snapshot, decision, phase_start: null };
+    return {
+      snapshot,
+      decision,
+      phase_start: null,
+      ...(phasePlan ? { plan: phasePlan } : {}),
+    };
   }
   const selectedPhase = resolvedPhases.find(({ phase_id: phaseId }) => (
     phaseId === decision.selected_phase_id
@@ -80,7 +108,12 @@ export async function preparePhase({
     snapshot,
     taskGuardHome,
   });
-  return { snapshot, decision, phase_start: phaseStart };
+  return {
+    snapshot,
+    decision,
+    phase_start: phaseStart,
+    ...(phasePlan ? { plan: phasePlan } : {}),
+  };
 }
 
 export async function prepareTaskResume({
@@ -157,9 +190,6 @@ export async function prepareTaskResume({
   const cleanupRequired = Boolean(state.heartbeat_automation_id) || verifiedCleanupRequired;
   const cleanupAutomationId = state.heartbeat_automation_id
     ?? (verifiedCleanupRequired ? state.resume_automation?.automation_id : null);
-  const resolvedPhases = phases
-    ? await resolvePhasesRuntimeIdentity(phases, { reader: runtimeIdentityReader })
-    : null;
   let snapshot;
   try {
     snapshot = validateFreshness(await snapshotStore.refresh());
@@ -179,9 +209,23 @@ export async function prepareTaskResume({
       notification: null,
     };
   }
-  const decision = resolvedPhases
-    ? evaluateBudget({
-      history: await readUsageHistory({ taskGuardHome }),
+  const restoredPlan = state.phase_plan ?? null;
+  const phasesForDecision = restoredPlan?.phases ?? phases;
+  const resolvedPhases = phasesForDecision
+    ? await resolvePhasesRuntimeIdentity(phasesForDecision, { reader: runtimeIdentityReader })
+    : null;
+  const history = resolvedPhases ? await readUsageHistory({ taskGuardHome }) : null;
+  const decision = restoredPlan
+    ? evaluatePlannedBudget({
+      history,
+      phases: resolvedPhases,
+      completedPhaseIds: restoredPlan.completed_phase_ids,
+      snapshot,
+      safetyReservePercent,
+    })
+    : resolvedPhases
+      ? evaluateBudget({
+      history,
       phases: resolvedPhases,
       snapshot,
       safetyReservePercent,
@@ -243,6 +287,15 @@ export async function prepareTaskResume({
     };
   }
 
+  if (restoredPlan) {
+    await loadOrCreatePhasePlan({
+      projectPath,
+      taskGuardHome,
+      taskId,
+      phases: restoredPlan.phases,
+      completedPhaseIds: restoredPlan.completed_phase_ids,
+    });
+  }
   const resumed = await resumeTask({
     projectPath,
     taskId,
@@ -274,6 +327,7 @@ export async function prepareTaskResume({
     resume,
     notification,
     ...(decision ? { decision } : {}),
+    ...(restoredPlan ? { plan: restoredPlan } : {}),
   };
 }
 
@@ -291,12 +345,26 @@ export async function completePhaseAndDecide({
   if (!snapshotStore || typeof snapshotStore.refresh !== "function") {
     throw new Error("Quota snapshot store is required");
   }
-  const resolvedPhases = await resolvePhasesRuntimeIdentity(phases, {
+  const phasePlan = await readPhasePlan({ projectPath, taskGuardHome });
+  const resolvedPhases = await resolvePhasesRuntimeIdentity(phasePlan?.phases ?? phases, {
     reader: runtimeIdentityReader,
   });
   const snapshot = validateFreshness(await snapshotStore.refresh());
   const history = await readUsageHistory({ taskGuardHome });
-  validateBudgetInput({ history, phases: resolvedPhases, snapshot, safetyReservePercent });
+  const completedPhaseIds = phasePlan
+    ? [...new Set([...phasePlan.completed_phase_ids, phaseId])]
+    : null;
+  if (phasePlan) {
+    evaluatePlannedBudget({
+      history,
+      phases: resolvedPhases,
+      completedPhaseIds,
+      snapshot,
+      safetyReservePercent,
+    });
+  } else {
+    validateBudgetInput({ history, phases: resolvedPhases, snapshot, safetyReservePercent });
+  }
   const measurement = await completePhase({
     projectPath,
     phaseId,
@@ -304,12 +372,23 @@ export async function completePhaseAndDecide({
     snapshot,
     taskGuardHome,
   });
-  const decision = evaluateBudget({
-    history: [...history, measurement],
-    phases: resolvedPhases,
-    snapshot,
-    safetyReservePercent,
-  });
+  const completedPlan = phasePlan
+    ? await completePhasePlan({ projectPath, phaseId, taskGuardHome })
+    : null;
+  const decision = completedPlan
+    ? evaluatePlannedBudget({
+      history: [...history, measurement],
+      phases: resolvedPhases,
+      completedPhaseIds: completedPlan.completed_phase_ids,
+      snapshot,
+      safetyReservePercent,
+    })
+    : evaluateBudget({
+      history: [...history, measurement],
+      phases: resolvedPhases,
+      snapshot,
+      safetyReservePercent,
+    });
   const notificationResult = notification
     ? await notifyDiscord(
       notification.event,
@@ -321,6 +400,7 @@ export async function completePhaseAndDecide({
     snapshot,
     measurement,
     decision,
+    ...(completedPlan ? { plan: completedPlan } : {}),
     ...(notification ? { notification: notificationResult } : {}),
   };
 }
@@ -394,7 +474,11 @@ export async function prepareQuotaPause({
       last_error: automationScheduleError,
       resolution: AUTOMATION_RESOLUTION.MANUAL_FALLBACK,
     };
-  const state = transitionTaskToQuotaPause(checkpointState, {
+  const phasePlan = await readPhasePlan({ projectPath, taskGuardHome });
+  const state = transitionTaskToQuotaPause({
+    ...checkpointState,
+    ...(phasePlan ? { phase_plan: phasePlan } : {}),
+  }, {
     snapshot,
     resumeAfter,
     threadReference: targetThread,

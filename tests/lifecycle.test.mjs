@@ -21,6 +21,10 @@ import { normalizeQuotaResponse } from "../scripts/lib/quota.mjs";
 import { QuotaSnapshotStore } from "../scripts/lib/quota-snapshot.mjs";
 import { completePhase, startPhase } from "../scripts/lib/usage.mjs";
 import { verifyAutomationTranscript } from "../scripts/lib/automation.mjs";
+import {
+  loadOrCreatePhasePlan,
+  readPhasePlan,
+} from "../scripts/lib/phase-planner.mjs";
 
 function snapshot(remaining, observedAt, resetAt = "2027-01-15T08:00:00.000Z") {
   return {
@@ -304,6 +308,128 @@ test("phase prepare resolves omitted runtime identity before its quota decision"
   assert.equal(completed.reasoning_effort, "high");
   assert.equal(completed.model_source, "codex_app_server_thread");
   assert.equal(completed.reasoning_effort_source, "codex_app_server_thread");
+});
+
+test("native phase planning persists completion and restores the next ready phase", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-native-plan-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  execFileSync("git", ["init", "-q", projectPath]);
+  await mkdir(taskGuardHome);
+  const runtime = {
+    model: "gpt-5.6-sol",
+    reasoning_effort: "high",
+    source: "codex_app_server_thread",
+    status: "VERIFIED",
+    reason: null,
+  };
+  await writeFile(path.join(taskGuardHome, "usage-history.jsonl"), [
+    ["planning", 2],
+    ["implementation", 5],
+    ["testing", 3],
+  ].map(([phase_type, quota_delta]) => JSON.stringify({
+    model: runtime.model,
+    reasoning_effort: runtime.reasoning_effort,
+    phase_type,
+    plan: "native-v1",
+    quota_delta,
+    measurement_confidence: "HIGH_CONFIDENCE",
+    reset_occurred: false,
+  })).join("\n") + "\n");
+  const phases = [
+    { task_id: "native-task", phase_id: "design", phase_type: "planning", plan: "native-v1", depends_on: [] },
+    { task_id: "native-task", phase_id: "backend", phase_type: "implementation", plan: "native-v1", depends_on: ["design"] },
+    { task_id: "native-task", phase_id: "frontend", phase_type: "implementation", plan: "native-v1", depends_on: ["design"] },
+    { task_id: "native-task", phase_id: "integration", phase_type: "testing", plan: "native-v1", depends_on: ["backend", "frontend"] },
+  ];
+
+  const prepared = await preparePhase({
+    projectPath,
+    taskGuardHome,
+    phases,
+    safetyReservePercent: 5,
+    snapshotStore: { refresh: async () => snapshot(30, "2026-08-31T12:20:00.000Z") },
+    runtimeIdentityReader: async () => runtime,
+  });
+  assert.equal(prepared.decision.selected_phase_id, "design");
+
+  const finished = await completePhaseAndDecide({
+    projectPath,
+    taskGuardHome,
+    phaseId: "design",
+    concurrentUsage: false,
+    safetyReservePercent: 5,
+    snapshotStore: { refresh: async () => snapshot(28, "2026-08-31T12:22:00.000Z") },
+    runtimeIdentityReader: async () => runtime,
+  });
+  assert.equal(finished.decision.selected_phase_id, "backend");
+  assert.deepEqual(finished.plan.completed_phase_ids, ["design"]);
+
+  const restored = await preparePhase({
+    projectPath,
+    taskGuardHome,
+    taskId: "native-task",
+    safetyReservePercent: 5,
+    snapshotStore: { refresh: async () => snapshot(28, "2026-08-31T12:23:00.000Z") },
+    runtimeIdentityReader: async () => runtime,
+  });
+  assert.equal(restored.decision.selected_phase_id, "backend");
+  assert.deepEqual(restored.plan.completed_phase_ids, ["design"]);
+});
+
+test("quota checkpoint restores the native phase plan before resume selection", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-native-resume-"));
+  const projectPath = path.join(root, "project");
+  const pauseHome = path.join(root, "pause-home");
+  const resumeHome = path.join(root, "resume-home");
+  execFileSync("git", ["init", "-q", projectPath]);
+  const phases = [
+    { task_id: "native-resume", phase_id: "design", phase_type: "planning", model: "gpt-5.6-sol", reasoning_effort: "high", depends_on: [] },
+    { task_id: "native-resume", phase_id: "backend", phase_type: "implementation", model: "gpt-5.6-sol", reasoning_effort: "high", depends_on: ["design"] },
+  ];
+  await loadOrCreatePhasePlan({
+    projectPath,
+    taskGuardHome: pauseHome,
+    phases,
+    completedPhaseIds: ["design"],
+  });
+  const paused = await prepareQuotaPause({
+    projectPath,
+    taskGuardHome: pauseHome,
+    checkpointState: {
+      task_id: "native-resume",
+      task_description: "Resume the native plan",
+      status: "WORKING",
+      exact_next_actions: ["Run backend"],
+    },
+    snapshotStore: { refresh: async () => snapshot(5, "2026-08-31T12:24:00.000Z") },
+    notifyOptions: { env: {} },
+  });
+  const checkpointState = await readCheckpoint(paused.checkpoint.checkpoint_path);
+  assert.deepEqual(checkpointState.phase_plan.completed_phase_ids, ["design"]);
+  await mkdir(resumeHome);
+  await writeFile(path.join(resumeHome, "usage-history.jsonl"), `${JSON.stringify({
+    model: "gpt-5.6-sol",
+    reasoning_effort: "high",
+    phase_type: "implementation",
+    quota_delta: 5,
+    measurement_confidence: "HIGH_CONFIDENCE",
+    reset_occurred: false,
+  })}\n`);
+
+  const resumed = await prepareTaskResume({
+    projectPath,
+    taskGuardHome: resumeHome,
+    taskId: "native-resume",
+    snapshotStore: { refresh: async () => snapshot(80, "2026-09-01T08:00:00.000Z") },
+    safetyReservePercent: 5,
+    notifyOptions: { env: {} },
+  });
+
+  assert.equal(resumed.status, "TASK_RESUMED");
+  assert.equal(resumed.decision.selected_phase_id, "backend");
+  assert.deepEqual((await readPhasePlan({ projectPath, taskGuardHome: resumeHome }))
+    .completed_phase_ids, ["design"]);
 });
 
 test("phase prepare does not create an active phase when no phase fits", async () => {

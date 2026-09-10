@@ -392,6 +392,60 @@ test("phase prepare CLI atomically selects and starts a phase with one snapshot"
   assert.equal(output.snapshot.snapshot_id, output.phase_start.quota_before_snapshot_id);
 });
 
+test("phase CLI restores a native dependency plan without caller dependency booleans", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "task-guard-native-plan-cli-"));
+  const project = path.join(root, "project");
+  const home = path.join(root, "global");
+  const prepareInput = path.join(root, "prepare.json");
+  const finishInput = path.join(root, "finish.json");
+  const restoreInput = path.join(root, "restore.json");
+  execFileSync("git", ["init", "-q", project]);
+  await mkdir(home);
+  await writeFile(path.join(home, "usage-history.jsonl"), [
+    ["planning", 2],
+    ["implementation", 5],
+  ].map(([phase_type, quota_delta]) => JSON.stringify({
+    model: "gpt-5.6-sol",
+    reasoning_effort: "high",
+    phase_type,
+    plan: "native-v1",
+    quota_delta,
+    measurement_confidence: "HIGH_CONFIDENCE",
+    reset_occurred: false,
+  })).join("\n") + "\n");
+  await writeFile(prepareInput, JSON.stringify({
+    safety_reserve_percent: 5,
+    phases: [
+      { task_id: "native-cli", phase_id: "design", phase_type: "planning", model: "gpt-5.6-sol", reasoning_effort: "high", plan: "native-v1", depends_on: [] },
+      { task_id: "native-cli", phase_id: "backend", phase_type: "implementation", model: "gpt-5.6-sol", reasoning_effort: "high", plan: "native-v1", depends_on: ["design"] },
+      { task_id: "native-cli", phase_id: "integration", phase_type: "testing", model: "gpt-5.6-sol", reasoning_effort: "high", plan: "native-v1", depends_on: ["backend"] },
+    ],
+  }));
+  await writeFile(finishInput, JSON.stringify({
+    concurrent_usage: "false",
+    safety_reserve_percent: 5,
+  }));
+  await writeFile(restoreInput, JSON.stringify({
+    task_id: "native-cli",
+    safety_reserve_percent: 5,
+  }));
+  const env = { TASK_GUARD_HOME: home, TASK_GUARD_TEST_QUOTA: "healthy" };
+
+  const prepared = run(["phase", "prepare", "--project", project, "--input", prepareInput], { env });
+  assert.equal(prepared.status, 0, prepared.stderr);
+  assert.equal(JSON.parse(prepared.stdout).decision.selected_phase_id, "design");
+
+  const finished = run([
+    "phase", "finish", "--project", project, "--phase-id", "design", "--input", finishInput,
+  ], { env });
+  assert.equal(finished.status, 0, finished.stderr);
+  assert.deepEqual(JSON.parse(finished.stdout).plan.completed_phase_ids, ["design"]);
+
+  const restored = run(["phase", "prepare", "--project", project, "--input", restoreInput], { env });
+  assert.equal(restored.status, 0, restored.stderr);
+  assert.equal(JSON.parse(restored.stdout).decision.selected_phase_id, "backend");
+});
+
 test("pause prepare persists one refreshed snapshot for resume scheduling", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "task-guard-pause-cli-"));
   const project = path.join(root, "project");
