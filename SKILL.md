@@ -35,7 +35,7 @@ Use `phase prepare --project <project> --input <phase-plan.json>` with the curre
 
 ## Measure each phase
 
-Each candidate passed to `phase prepare` must include the start metadata: `task_id`, `phase_id`, `model`, `reasoning_effort`, `phase_type`, and optional plan partition. Supply the actual active runtime values. If they cannot be verified, use `unknown`; never substitute config defaults while claiming they are active session values.
+Each candidate passed to `phase prepare` must include `task_id`, `phase_id`, `phase_type`, and an optional plan partition. Omit `model` and `reasoning_effort` by default: Task Guard uses the Codex-injected `CODEX_THREAD_ID`, reads that exact thread through app-server, verifies the returned thread ID and optional session ID, and records its configured model and reasoning effort. `auto` and `unknown` also request detection. If any identity check or read fails, the unresolved value remains `unknown`; Task Guard never promotes config defaults or a nearby thread. Explicit model/reasoning values remain supported for non-Codex callers and are marked `caller`. Use `runtime identify` to inspect the current result.
 
 Finish the phase at a coherent boundary. When more work remains, prefer `phase finish --project <project> --phase-id <id> --input <decision.json>` so one authoritative after snapshot is shared by history, predictor, next-phase decision, and any quota-bearing notification. Use plain `phase complete` only when no immediate budget decision is needed. Use `concurrent_usage: false` only when no other shared-pool work ran.
 

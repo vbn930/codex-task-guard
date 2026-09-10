@@ -4,11 +4,17 @@ All notable changes to Codex Task Guard are documented here.
 
 ## Unreleased
 
+### Added
+
+- Added exact current-thread model and reasoning-effort detection through Codex app-server.
+- Added `runtime identify` for sanitized runtime identity diagnostics.
+
 ### Changed
 
 - Added bounded, cohort-aware usage history retention with atomic compaction.
 - Switched sufficiently measured cohorts from permanent observed maximum to recent P90 plus a one-point safety margin.
 - Kept internal budget decisions independent from the `history list` display limit.
+- Made omitted, `auto`, and `unknown` phase runtime fields resolve automatically with fail-closed provenance.
 
 ## 0.2.0 - 2026-09-09
 

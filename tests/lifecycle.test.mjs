@@ -19,7 +19,7 @@ import {
 } from "../scripts/lib/lifecycle.mjs";
 import { normalizeQuotaResponse } from "../scripts/lib/quota.mjs";
 import { QuotaSnapshotStore } from "../scripts/lib/quota-snapshot.mjs";
-import { startPhase } from "../scripts/lib/usage.mjs";
+import { completePhase, startPhase } from "../scripts/lib/usage.mjs";
 import { verifyAutomationTranscript } from "../scripts/lib/automation.mjs";
 
 function snapshot(remaining, observedAt, resetAt = "2027-01-15T08:00:00.000Z") {
@@ -249,6 +249,61 @@ test("phase prepare uses one authoritative snapshot for decision and phase start
   assert.equal(result.phase_start.quota_before, 18);
   assert.equal(result.decision.quota_snapshot_id, current.snapshot_id);
   assert.equal(result.phase_start.quota_before_snapshot_id, current.snapshot_id);
+});
+
+test("phase prepare resolves omitted runtime identity before its quota decision", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-phase-runtime-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  execFileSync("git", ["init", "-q", projectPath]);
+  await mkdir(taskGuardHome);
+  await writeFile(path.join(taskGuardHome, "usage-history.jsonl"), `${JSON.stringify({
+    model: "gpt-5.6-sol",
+    reasoning_effort: "high",
+    phase_type: "implementation",
+    quota_delta: 2,
+    measurement_confidence: "HIGH_CONFIDENCE",
+    reset_occurred: false,
+  })}\n`);
+  const current = snapshot(18, "2026-08-31T12:24:00.000Z");
+  let identityReads = 0;
+
+  const result = await preparePhase({
+    projectPath,
+    taskGuardHome,
+    snapshotStore: { refresh: async () => current },
+    safetyReservePercent: 5,
+    runtimeIdentityReader: async () => {
+      identityReads += 1;
+      return {
+        model: "gpt-5.6-sol",
+        reasoning_effort: "high",
+        source: "codex_app_server_thread",
+        status: "VERIFIED",
+        reason: null,
+      };
+    },
+    phases: [{
+      task_id: "automatic-runtime-task",
+      phase_id: "implementation",
+      phase_type: "implementation",
+      dependencies_met: true,
+    }],
+  });
+
+  assert.equal(identityReads, 1);
+  assert.equal(result.decision.selected_phase_id, "implementation");
+  const completed = await completePhase({
+    projectPath,
+    taskGuardHome,
+    phaseId: "implementation",
+    concurrentUsage: false,
+    snapshot: current,
+  });
+  assert.equal(completed.model, "gpt-5.6-sol");
+  assert.equal(completed.reasoning_effort, "high");
+  assert.equal(completed.model_source, "codex_app_server_thread");
+  assert.equal(completed.reasoning_effort_source, "codex_app_server_thread");
 });
 
 test("phase prepare does not create an active phase when no phase fits", async () => {

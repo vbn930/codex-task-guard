@@ -20,6 +20,8 @@ const OPTIONAL_METADATA = [
   "files_before",
   "expected_files_touched",
   "tool_profile",
+  "model_source",
+  "reasoning_effort_source",
 ];
 const RECENT_ESTIMATE_MIN_SAMPLES = 20;
 const RECENT_ESTIMATE_WINDOW = 50;
@@ -121,6 +123,12 @@ export async function startPhase({
   return {
     phase_id: state.phase_id,
     phase_run_id: state.phase_run_id,
+    model: state.model,
+    reasoning_effort: state.reasoning_effort,
+    ...(state.model_source ? { model_source: state.model_source } : {}),
+    ...(state.reasoning_effort_source
+      ? { reasoning_effort_source: state.reasoning_effort_source }
+      : {}),
     started_at: state.started_at,
     quota_before: state.quota_before,
     quota_before_observed_at: state.quota_before_observed_at,

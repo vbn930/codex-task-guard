@@ -10,6 +10,16 @@ Verified on 2026-08-31 with Codex CLI `0.151.0-alpha.7.2` and Codex desktop `26.
 - The current Codex app exposes a stable local-automation feature and a current-thread heartbeat tool to the agent. It is not part of this utility's app-server contract, so automation is optional and instruction-driven. Checkpoint plus `resume_after` remains the fallback.
 - The repository began empty, with no existing implementation or compatibility surface.
 
+## Current-thread runtime identity probe
+
+Re-verified on 2026-09-10 with Codex CLI `0.153.4` on Windows:
+
+- Codex tool processes exposed matching `CODEX_THREAD_ID` and `CODEX_SESSION_ID` UUIDs.
+- The generated experimental app-server schema exposed `thread/read` with required `threadId` and optional `includeTurns`. Its thread response includes nullable `model` and `reasoningEffort` fields.
+- A live metadata-only read of the exact injected thread returned the configured model and reasoning effort, and its thread/session identifiers matched the injected values.
+- The protocol explicitly describes these as current configured values when loaded or latest persisted values otherwise, not per-turn execution telemetry.
+- Runtime detection therefore requires exact thread identity and, when injected, exact session identity. Missing IDs, mismatches, read errors, and absent fields fail closed to `unknown`. Configuration defaults and recency-based thread selection are deliberately excluded.
+
 ## Same-thread automation probe
 
 Re-verified on 2026-08-31 before implementing resume-automation recovery:

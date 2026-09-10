@@ -34,6 +34,10 @@ import {
   isTaskStatus,
   transitionTaskToQuotaPause,
 } from "./task-state-contract.mjs";
+import {
+  readRuntimeIdentity,
+  resolvePhasesRuntimeIdentity,
+} from "./runtime-identity.mjs";
 
 function sameThreadResumePrompt() {
   return [
@@ -49,21 +53,25 @@ export async function preparePhase({
   safetyReservePercent,
   snapshotStore,
   taskGuardHome,
+  runtimeIdentityReader = readRuntimeIdentity,
 }) {
   if (!snapshotStore || typeof snapshotStore.refresh !== "function") {
     throw new Error("Quota snapshot store is required");
   }
+  const resolvedPhases = await resolvePhasesRuntimeIdentity(phases, {
+    reader: runtimeIdentityReader,
+  });
   const snapshot = validateFreshness(await snapshotStore.refresh());
   const decision = evaluateBudget({
     history: await readUsageHistory({ taskGuardHome }),
-    phases,
+    phases: resolvedPhases,
     snapshot,
     safetyReservePercent,
   });
   if (!decision.selected_phase_id) {
     return { snapshot, decision, phase_start: null };
   }
-  const selectedPhase = phases.find(({ phase_id: phaseId }) => (
+  const selectedPhase = resolvedPhases.find(({ phase_id: phaseId }) => (
     phaseId === decision.selected_phase_id
   ));
   const phaseStart = await startPhase({
@@ -86,6 +94,7 @@ export async function prepareTaskResume({
   notifyOptions,
   phases,
   safetyReservePercent,
+  runtimeIdentityReader = readRuntimeIdentity,
 }) {
   const checkpointPath = await resolveCheckpointPath(projectPath);
   const state = await readCheckpoint(checkpointPath);
@@ -148,6 +157,9 @@ export async function prepareTaskResume({
   const cleanupRequired = Boolean(state.heartbeat_automation_id) || verifiedCleanupRequired;
   const cleanupAutomationId = state.heartbeat_automation_id
     ?? (verifiedCleanupRequired ? state.resume_automation?.automation_id : null);
+  const resolvedPhases = phases
+    ? await resolvePhasesRuntimeIdentity(phases, { reader: runtimeIdentityReader })
+    : null;
   let snapshot;
   try {
     snapshot = validateFreshness(await snapshotStore.refresh());
@@ -167,10 +179,10 @@ export async function prepareTaskResume({
       notification: null,
     };
   }
-  const decision = phases
+  const decision = resolvedPhases
     ? evaluateBudget({
       history: await readUsageHistory({ taskGuardHome }),
-      phases,
+      phases: resolvedPhases,
       snapshot,
       safetyReservePercent,
     })
@@ -274,13 +286,17 @@ export async function completePhaseAndDecide({
   snapshotStore,
   taskGuardHome,
   notification,
+  runtimeIdentityReader = readRuntimeIdentity,
 }) {
   if (!snapshotStore || typeof snapshotStore.refresh !== "function") {
     throw new Error("Quota snapshot store is required");
   }
+  const resolvedPhases = await resolvePhasesRuntimeIdentity(phases, {
+    reader: runtimeIdentityReader,
+  });
   const snapshot = validateFreshness(await snapshotStore.refresh());
   const history = await readUsageHistory({ taskGuardHome });
-  validateBudgetInput({ history, phases, snapshot, safetyReservePercent });
+  validateBudgetInput({ history, phases: resolvedPhases, snapshot, safetyReservePercent });
   const measurement = await completePhase({
     projectPath,
     phaseId,
@@ -290,7 +306,7 @@ export async function completePhaseAndDecide({
   });
   const decision = evaluateBudget({
     history: [...history, measurement],
-    phases,
+    phases: resolvedPhases,
     snapshot,
     safetyReservePercent,
   });

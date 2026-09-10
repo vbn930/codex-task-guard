@@ -36,6 +36,7 @@ The command returns JSON and exits nonzero when a required check fails. An uncon
 
 ```text
 node scripts/task-guard.mjs quota
+node scripts/task-guard.mjs runtime identify
 node scripts/task-guard.mjs doctor --project C:\path\to\project
 node scripts/task-guard.mjs automation verify --input -
 node scripts/task-guard.mjs phase prepare --project C:\path\to\project --input budget.json
@@ -80,9 +81,15 @@ Only exact 300-minute and 10,080-minute windows are labeled five-hour and weekly
 
 Every read is wrapped as a timestamped quota snapshot with `source`, `observed_at`, `snapshot_id`, availability, and freshness. A successful JIT read is `AUTHORITATIVE`; a persisted last-known snapshot is always `STALE` because Task Guard does not invent a time threshold. Reader failure returns `UNAVAILABLE` and may include the stale `last_known_snapshot`, which is never presented as current. If the read succeeds but the metadata-only cache at `%CODEX_HOME%\task-guard\quota-snapshot.json` cannot be written, the observation remains `AUTHORITATIVE` and reports `SNAPSHOT_PERSIST_FAILED` separately.
 
+## Runtime identity
+
+Phase inputs may omit `model` and `reasoning_effort`. At each phase decision/start boundary, Task Guard reads the Codex-injected `CODEX_THREAD_ID`, calls app-server `thread/read` with `includeTurns: false`, and accepts the returned configured model and reasoning effort only when the thread ID and, when available, `CODEX_SESSION_ID` match exactly. It records `model_source` and `reasoning_effort_source` as `codex_app_server_thread`. Missing IDs, read failures, mismatches, and absent fields fail closed to `unknown` with `unavailable` provenance; configuration defaults and other recent threads are never used as substitutes.
+
+`runtime identify` exposes the sanitized result without thread IDs or thread contents. The phase commands also return the resolved model, reasoning effort, and sources at start. Explicit non-`auto` values remain backward compatible and are labeled `caller`. App-server describes these fields as current configured values for a loaded thread or the latest persisted values otherwise, not per-turn execution telemetry.
+
 ## Quota-budgeted phases
 
-The task remains the thread-level goal. The agent decomposes it into dependency-aware phases. `phase prepare` is the default start boundary: it performs one JIT refresh, evaluates the budget, and records only the selected phase start from that same snapshot. A no-fit decision creates no active phase. `phase start` and `budget evaluate` remain manual diagnostics. `phase finish` is the completion boundary: it performs one JIT refresh, records the after measurement, evaluates the next phases, and optionally builds a Discord notification from that same snapshot. Usage records use schema v2 and a stable `phase_run_id`, so retrying after a committed measurement cannot append a duplicate. Measurements include before/after snapshot IDs, sources, observation times, reset identity, and concurrency quality; they contain no source contents or repository paths.
+The task remains the thread-level goal. The agent decomposes it into dependency-aware phases. `phase prepare` is the default start boundary: it resolves omitted runtime identity, performs one JIT quota refresh, evaluates the budget, and records only the selected phase start from that same snapshot. A no-fit decision creates no active phase. `phase start` and `budget evaluate` remain manual diagnostics and use the same runtime resolution. `phase finish` is the completion boundary: it resolves pending-phase runtime identity, performs one JIT refresh, records the after measurement, evaluates the next phases, and optionally builds a Discord notification from that same snapshot. Usage records use schema v2 and a stable `phase_run_id`, so retrying after a committed measurement cannot append a duplicate. Measurements include before/after snapshot IDs, sources, observation times, reset identity, runtime provenance, and concurrency quality; they contain no source contents or repository paths.
 
 The estimator uses only an exact plan/model/reasoning/phase-type cohort. Samples are excluded when a reset crossed the phase, concurrent usage occurred or is unknown, or the integer quota reading did not move. Cohorts with fewer than 20 valid samples use the highest observed percentage-point delta. At 20 samples, the policy switches to the nearest-rank P90 from the latest 50 valid samples plus a one-point safety margin. With no valid cohort, Task Guard returns `INSUFFICIENT_HISTORY` instead of inventing a cost. Both `phase prepare` and diagnostic `budget evaluate` subtract the caller-provided safety reserve from live five-hour quota and select the first dependency-ready phase whose observed upper cost fits.
 
@@ -142,6 +149,7 @@ Delete `%CODEX_HOME%\skills\task-guard` (or `%USERPROFILE%\.codex\skills\task-gu
 - Local scheduled resume requires the host computer to remain powered on, the desktop app to remain running, and the project to remain available on disk. System sleep, hibernation, shutdown, or closing the app can delay the run, so use the manual same-thread fallback when those conditions cannot be maintained.
 - Quota and `doctor` require the Codex CLI on `PATH`; Codex Desktop alone is not sufficient for the app-server quota probe.
 - App-server startup can take tens of seconds on the first read.
+- Runtime auto-detection reports configured thread metadata, not per-turn execution telemetry, and returns `unknown` outside a Codex process that exposes a matching current thread.
 - The current implementation uses process-per-boundary JIT reads. Persistent app-server monitoring and `account/rateLimits/updated` subscription are future optimizations.
 - `UNKNOWN` quota requires human/agent judgment about whether to continue; the utility does not apply a blind percentage threshold.
 - Cold-start cohorts return `INSUFFICIENT_HISTORY`; the estimator has no fixed model multiplier, automatic model switching, or cross-cohort extrapolation.

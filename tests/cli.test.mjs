@@ -24,6 +24,21 @@ test("quota command exposes deterministic low-quota JSON", () => {
   assert.equal(output.five_hour.remaining_percent, 5);
 });
 
+test("runtime identify fails closed when Codex does not expose a current thread", () => {
+  const result = run(["runtime", "identify"], {
+    env: { CODEX_THREAD_ID: "", CODEX_SESSION_ID: "" },
+  });
+
+  assert.equal(result.status, 4);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    model: "unknown",
+    reasoning_effort: "unknown",
+    source: "unavailable",
+    status: "UNAVAILABLE",
+    reason: "CURRENT_THREAD_ID_UNAVAILABLE",
+  });
+});
+
 test("checkpoint CLI saves, verifies, and refuses an unsafe direct resume", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "task-guard-cli-"));
   const project = path.join(root, "project");

@@ -9,8 +9,6 @@ Task Guard treats the task as the thread-level goal and phases as dependency-saf
   "task_id": "task-24",
   "phase_id": "formatter-implementation",
   "phase_type": "implementation",
-  "model": "gpt-5.6-sol",
-  "reasoning_effort": "high",
   "plan": "plus",
   "context_bucket": "large",
   "files_before": 8,
@@ -19,7 +17,13 @@ Task Guard treats the task as the thread-level goal and phases as dependency-saf
 }
 ```
 
-Required fields are `task_id`, `phase_id`, `phase_type`, `model`, and `reasoning_effort`. `plan` is a history partition key rather than a direct cost multiplier. Use active session values when exposed; otherwise record `unknown` rather than presenting configuration defaults as verified session state.
+Required fields are `task_id`, `phase_id`, and `phase_type`. Omitted, `auto`, or `unknown` `model` and `reasoning_effort` values are resolved from the exact current Codex thread before quota is refreshed. Detection requires a Codex-injected thread ID, a successful app-server `thread/read`, exact returned thread identity, optional exact session identity, and non-empty runtime fields. Failure stays `unknown`; config defaults and other threads are not fallbacks. Explicit values remain supported and are marked as caller-supplied. `plan` is a history partition key rather than a direct cost multiplier.
+
+Inspect the current sanitized identity independently with:
+
+```text
+node <skill-root>/scripts/task-guard.mjs runtime identify
+```
 
 For the default automated start boundary, put this metadata on every candidate in the budget input below and run:
 
@@ -55,8 +59,6 @@ node <skill-root>/scripts/task-guard.mjs phase complete --project <project> --ph
       "task_id": "task-24",
       "phase_id": "formatter-implementation",
       "phase_type": "implementation",
-      "model": "gpt-5.6-sol",
-      "reasoning_effort": "high",
       "plan": "plus",
       "dependencies_met": true
     },
@@ -64,8 +66,6 @@ node <skill-root>/scripts/task-guard.mjs phase complete --project <project> --ph
       "task_id": "task-24",
       "phase_id": "integration-tests",
       "phase_type": "testing",
-      "model": "gpt-5.6-sol",
-      "reasoning_effort": "high",
       "plan": "plus",
       "dependencies_met": false
     }
@@ -77,7 +77,7 @@ node <skill-root>/scripts/task-guard.mjs phase complete --project <project> --ph
 node <skill-root>/scripts/task-guard.mjs phase prepare --project <project> --input <budget.json>
 ```
 
-The command reads live quota once, computes `available_budget = remaining_percent - safety_reserve_percent`, and evaluates exact plan/model/reasoning/phase-type cohorts. Fewer than 20 valid samples use the highest observed delta as `estimated_upper_cost`; at 20 samples, the estimator uses nearest-rank P90 from the latest 50 valid samples plus one percentage point. It selects the first dependency-ready phase that fits and records its start from that same quota snapshot. A phase with no valid nonzero samples returns `INSUFFICIENT_HISTORY`; split or deliberately calibrate it instead of inventing a cost. `budget evaluate --input <budget.json>` remains a standalone diagnostic that does not start a phase.
+The command resolves runtime identity first, then reads live quota once, computes `available_budget = remaining_percent - safety_reserve_percent`, and evaluates exact plan/model/reasoning/phase-type cohorts. Fewer than 20 valid samples use the highest observed delta as `estimated_upper_cost`; at 20 samples, the estimator uses nearest-rank P90 from the latest 50 valid samples plus one percentage point. It selects the first dependency-ready phase that fits and records its start from that same quota snapshot. A phase with no valid nonzero samples returns `INSUFFICIENT_HISTORY`; split or deliberately calibrate it instead of inventing a cost. `budget evaluate --input <budget.json>` remains a standalone diagnostic that does not start a phase.
 
 When a next-phase decision follows completion, use the same JSON shape plus `"concurrent_usage": "false"` with `phase finish`. It performs one authoritative refresh and returns `snapshot`, `measurement`, and `decision` sharing one `snapshot_id`. History records `quota_before_observed_at`, `quota_after_observed_at`, reset identity, `concurrency_status`, `measurement_confidence`, and `external_usage_possible`. A direct delta is recorded only for a verified identical reset window.
 

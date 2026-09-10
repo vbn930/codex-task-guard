@@ -30,6 +30,10 @@ import {
   startPhase,
 } from "./lib/usage.mjs";
 import { verifyAutomationTranscript } from "./lib/automation.mjs";
+import {
+  readRuntimeIdentity,
+  resolvePhasesRuntimeIdentity,
+} from "./lib/runtime-identity.mjs";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
@@ -41,6 +45,14 @@ async function quotaCommand() {
   const snapshot = await refreshCurrentQuota();
   printJson(snapshot);
   return snapshot.freshness === "AUTHORITATIVE" ? 0 : 2;
+}
+
+async function runtimeCommand(args) {
+  const [action] = args;
+  if (action !== "identify") throw new Error("runtime action must be identify");
+  const identity = await readRuntimeIdentity();
+  printJson(identity);
+  return identity.status === "VERIFIED" ? 0 : 4;
 }
 
 function currentQuotaStore() {
@@ -209,9 +221,10 @@ async function phaseCommand(args) {
   }
   if (action === "start") {
     const metadata = await readJsonInput(optionValue(options, "--input", { required: true }));
+    const [resolvedMetadata] = await resolvePhasesRuntimeIdentity([metadata]);
     printJson(await startPhase({
       projectPath,
-      metadata,
+      metadata: resolvedMetadata,
       snapshot: await refreshCurrentQuota(),
     }));
     return 0;
@@ -260,10 +273,11 @@ async function budgetCommand(args) {
   const [action, ...options] = args;
   if (action !== "evaluate") throw new Error("budget action must be evaluate");
   const input = await readJsonInput(optionValue(options, "--input", { required: true }));
+  const phases = await resolvePhasesRuntimeIdentity(input.phases);
   const snapshot = await refreshCurrentQuota();
   printJson(evaluateBudget({
     history: await readUsageHistory(),
-    phases: input.phases,
+    phases,
     snapshot,
     safetyReservePercent: input.safety_reserve_percent,
   }));
@@ -328,12 +342,13 @@ async function resumeCommand(args) {
 }
 
 function printHelp() {
-  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  doctor [--project PATH]\n  automation verify --input FILE| -\n  phase prepare --project PATH --input FILE| -\n  phase start --project PATH --input FILE| -\n  phase complete --project PATH --phase-id ID [--concurrent-usage true|false|unknown]\n  phase finish --project PATH --phase-id ID --input FILE| -\n  history list [--limit N]\n  budget evaluate --input FILE| -\n  pause prepare --project PATH --input FILE| -\n  pause finalize --project PATH --task-id ID --input FILE| -\n  resume prepare --project PATH --task-id ID --input FILE| -\n  checkpoint automation set --project PATH --task-id ID --input FILE| -\n  checkpoint heartbeat set --project PATH --task-id ID --automation-id ID\n  checkpoint heartbeat clear --project PATH --task-id ID\n  checkpoint registry repair --project PATH --task-id ID\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
+  process.stdout.write(`Usage: node scripts/task-guard.mjs <command>\n\nCommands:\n  quota\n  runtime identify\n  doctor [--project PATH]\n  automation verify --input FILE| -\n  phase prepare --project PATH --input FILE| -\n  phase start --project PATH --input FILE| -\n  phase complete --project PATH --phase-id ID [--concurrent-usage true|false|unknown]\n  phase finish --project PATH --phase-id ID --input FILE| -\n  history list [--limit N]\n  budget evaluate --input FILE| -\n  pause prepare --project PATH --input FILE| -\n  pause finalize --project PATH --task-id ID --input FILE| -\n  resume prepare --project PATH --task-id ID --input FILE| -\n  checkpoint automation set --project PATH --task-id ID --input FILE| -\n  checkpoint heartbeat set --project PATH --task-id ID --automation-id ID\n  checkpoint heartbeat clear --project PATH --task-id ID\n  checkpoint registry repair --project PATH --task-id ID\n  checkpoint save --project PATH --input FILE| -\n  checkpoint show --project PATH | --checkpoint FILE\n  checkpoint verify --project PATH | --checkpoint FILE\n  checkpoint list\n  checkpoint complete --project PATH --task-id ID\n  notify EVENT --input FILE| -\n`);
 }
 
 export async function main(argv = process.argv.slice(2)) {
   const [command] = argv;
   if (command === "quota") return quotaCommand();
+  if (command === "runtime") return runtimeCommand(argv.slice(1));
   if (command === "automation") return automationCommand(argv.slice(1));
   if (command === "doctor") return doctorCommand(argv.slice(1));
   if (command === "phase") return phaseCommand(argv.slice(1));
