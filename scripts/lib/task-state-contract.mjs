@@ -1,5 +1,6 @@
 import {
   AUTOMATION_STATUS,
+  isTerminalAutomation,
   isVerifiedAutomation,
 } from "./automation-contract.mjs";
 
@@ -20,6 +21,14 @@ export function normalizeTaskStatus(value) {
   const normalized = typeof value === "string" ? value.trim().toUpperCase() : "";
   if (!TASK_STATUSES.has(normalized)) throw new Error("Invalid task status");
   return normalized;
+}
+
+export function isTaskStatus(value, expected) {
+  try {
+    return normalizeTaskStatus(value) === expected;
+  } catch {
+    return false;
+  }
 }
 
 export function isActiveTaskStatus(value) {
@@ -79,6 +88,56 @@ export function transitionTaskToQuotaPause(state, {
     resume_mode: resumeMode,
     resume_automation: resumeAutomation,
   };
+}
+
+export function transitionTaskResumeAutomation(state, automation) {
+  if (!isTaskStatus(state?.status, TASK_STATUS.PAUSED_FOR_QUOTA)) {
+    throw new Error("resumeAutomation can only be finalized from PAUSED_FOR_QUOTA");
+  }
+  if (isTerminalAutomation(state.resume_automation)) {
+    throw new Error("Cannot rewrite a terminal automation state");
+  }
+  if (automation.snapshot_id && automation.snapshot_id !== state.quota_snapshot?.snapshot_id) {
+    throw new Error("resumeAutomation snapshot_id does not match the checkpoint");
+  }
+  if (automation.resume_after && automation.resume_after !== state.resume_after) {
+    throw new Error("resumeAutomation resume_after does not match the checkpoint");
+  }
+  if (
+    automation.automation_fingerprint
+    && state.resume_automation?.automation_fingerprint
+    && automation.automation_fingerprint !== state.resume_automation.automation_fingerprint
+  ) {
+    throw new Error("resumeAutomation fingerprint does not match the checkpoint intent");
+  }
+  if (
+    isVerifiedAutomation(automation)
+    && state.resume_automation?.automation_fingerprint !== automation.automation_fingerprint
+  ) {
+    throw new Error("VERIFIED resumeAutomation requires the checkpoint intent fingerprint");
+  }
+  if (
+    automation.target_thread
+    && state.thread_reference
+    && automation.target_thread !== state.thread_reference
+  ) {
+    throw new Error("resumeAutomation target_thread does not match the checkpoint");
+  }
+  if (isVerifiedAutomation(automation) && automation.target_thread !== state.thread_reference) {
+    throw new Error("VERIFIED resumeAutomation requires the checkpoint target thread");
+  }
+  const verified = isVerifiedAutomation(automation);
+  const nextState = {
+    ...state,
+    resume_automation: automation,
+    resume_mode: verified ? TASK_RESUME_MODE.AUTOMATION : TASK_RESUME_MODE.MANUAL,
+  };
+  if (automation.automation_id) {
+    nextState.heartbeat_automation_id = automation.automation_id;
+  } else {
+    delete nextState.heartbeat_automation_id;
+  }
+  return nextState;
 }
 
 export function transitionTaskToWorking(state, {

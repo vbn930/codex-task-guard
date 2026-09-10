@@ -30,6 +30,8 @@ import {
 } from "./usage.mjs";
 import {
   TASK_RESUME_MODE,
+  TASK_STATUS,
+  isTaskStatus,
   transitionTaskToQuotaPause,
 } from "./task-state-contract.mjs";
 
@@ -90,7 +92,7 @@ export async function prepareTaskResume({
   if (state.task_id !== taskId) {
     throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
   }
-  if (state.status?.toUpperCase() === "WORKING") {
+  if (isTaskStatus(state.status, TASK_STATUS.WORKING)) {
     return {
       status: "ALREADY_RESUMED",
       snapshot: null,
@@ -104,7 +106,7 @@ export async function prepareTaskResume({
       notification: null,
     };
   }
-  if (state.status?.toUpperCase() !== "PAUSED_FOR_QUOTA") {
+  if (!isTaskStatus(state.status, TASK_STATUS.PAUSED_FOR_QUOTA)) {
     return {
       status: "TASK_BLOCKED",
       snapshot: null,
@@ -424,7 +426,7 @@ export async function finalizeQuotaPause({
   if (state.task_id !== taskId) {
     throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
   }
-  if (state.status !== "PAUSED_FOR_QUOTA") {
+  if (!isTaskStatus(state.status, TASK_STATUS.PAUSED_FOR_QUOTA)) {
     throw new Error("Quota pause can only be finalized from PAUSED_FOR_QUOTA");
   }
   const expected = buildResumeAutomationIntent({
@@ -468,5 +470,9 @@ export async function finalizeQuotaPause({
     },
     { ...notifyOptions, snapshot: state.quota_snapshot },
   );
-  return { checkpoint, notification, resume_mode: verified ? "AUTOMATION" : "MANUAL" };
+  return {
+    checkpoint,
+    notification,
+    resume_mode: verified ? TASK_RESUME_MODE.AUTOMATION : TASK_RESUME_MODE.MANUAL,
+  };
 }

@@ -1,7 +1,6 @@
 import { access, readFile, rm } from "node:fs/promises";
 
 import {
-  isTerminalAutomation,
   isVerifiedAutomation,
   sanitizeResumeAutomation,
 } from "./automation-contract.mjs";
@@ -27,7 +26,9 @@ import {
 import {
   TASK_STATUS,
   isActiveTaskStatus,
+  isTaskStatus,
   normalizeTaskStatus,
+  transitionTaskResumeAutomation,
   transitionTaskToWorking,
 } from "./task-state-contract.mjs";
 
@@ -312,55 +313,15 @@ export async function patchCheckpointResumeAutomation({
   }
   const now = new Date().toISOString();
   let registryError = null;
+  let resumeMode = null;
 
   await withRegistryLock(taskGuardHome, async () => {
     const state = await readCheckpoint(checkpointPath);
     if (state.task_id !== taskId) {
       throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
     }
-    if (normalizeTaskStatus(state.status) !== TASK_STATUS.PAUSED_FOR_QUOTA) {
-      throw new Error("resumeAutomation can only be finalized from PAUSED_FOR_QUOTA");
-    }
-    if (isTerminalAutomation(state.resume_automation)) {
-      throw new Error("Cannot rewrite a terminal automation state");
-    }
-    if (automation.snapshot_id && automation.snapshot_id !== state.quota_snapshot?.snapshot_id) {
-      throw new Error("resumeAutomation snapshot_id does not match the checkpoint");
-    }
-    if (automation.resume_after && automation.resume_after !== state.resume_after) {
-      throw new Error("resumeAutomation resume_after does not match the checkpoint");
-    }
-    if (
-      automation.automation_fingerprint
-      && state.resume_automation?.automation_fingerprint
-      && automation.automation_fingerprint !== state.resume_automation.automation_fingerprint
-    ) {
-      throw new Error("resumeAutomation fingerprint does not match the checkpoint intent");
-    }
-    if (
-      isVerifiedAutomation(automation)
-      && state.resume_automation?.automation_fingerprint !== automation.automation_fingerprint
-    ) {
-      throw new Error("VERIFIED resumeAutomation requires the checkpoint intent fingerprint");
-    }
-    if (
-      automation.target_thread
-      && state.thread_reference
-      && automation.target_thread !== state.thread_reference
-    ) {
-      throw new Error("resumeAutomation target_thread does not match the checkpoint");
-    }
-    if (isVerifiedAutomation(automation) && automation.target_thread !== state.thread_reference) {
-      throw new Error("VERIFIED resumeAutomation requires the checkpoint target thread");
-    }
-    const resumeMode = isVerifiedAutomation(automation) ? "AUTOMATION" : "MANUAL";
-    const patchedState = {
-      ...state,
-      resume_automation: automation,
-      resume_mode: resumeMode,
-    };
-    if (automation.automation_id) patchedState.heartbeat_automation_id = automation.automation_id;
-    else delete patchedState.heartbeat_automation_id;
+    const patchedState = transitionTaskResumeAutomation(state, automation);
+    resumeMode = patchedState.resume_mode;
     await atomicWriteText(checkpointPath, renderCheckpoint(patchedState));
     registryError = await updateDerivedRegistry({
       taskGuardHome,
@@ -394,7 +355,7 @@ export async function patchCheckpointResumeAutomation({
     registry_updated: registryError === null,
     recovery_required: registryError !== null,
     ...(registryError ? { error: registryError } : {}),
-    resume_mode: isVerifiedAutomation(automation) ? "AUTOMATION" : "MANUAL",
+    resume_mode: resumeMode,
     resume_automation: automation,
   };
 }
@@ -450,7 +411,7 @@ export async function resumeTask({
     if (state.task_id !== taskId) {
       throw new Error(`Checkpoint belongs to ${state.task_id}, not ${taskId}`);
     }
-    if (normalizeTaskStatus(state.status) === TASK_STATUS.WORKING) {
+    if (isTaskStatus(state.status, TASK_STATUS.WORKING)) {
       result = {
         checkpoint_path: checkpointPath,
         status: "already_resumed",
@@ -458,7 +419,7 @@ export async function resumeTask({
       };
       return;
     }
-    if (normalizeTaskStatus(state.status) !== TASK_STATUS.PAUSED_FOR_QUOTA) {
+    if (!isTaskStatus(state.status, TASK_STATUS.PAUSED_FOR_QUOTA)) {
       throw new Error("Task can only resume from PAUSED_FOR_QUOTA");
     }
     if (repositoryVerification?.matches !== true) {

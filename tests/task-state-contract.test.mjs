@@ -5,7 +5,9 @@ import {
   TASK_RESUME_MODE,
   TASK_STATUS,
   isActiveTaskStatus,
+  isTaskStatus,
   normalizeTaskStatus,
+  transitionTaskResumeAutomation,
   transitionTaskToQuotaPause,
   transitionTaskToWorking,
 } from "../scripts/lib/task-state-contract.mjs";
@@ -27,6 +29,11 @@ test("both persisted task statuses represent an active checkpoint owner", () => 
   assert.equal(isActiveTaskStatus(TASK_STATUS.WORKING), true);
   assert.equal(isActiveTaskStatus(TASK_STATUS.PAUSED_FOR_QUOTA), true);
   assert.equal(isActiveTaskStatus("BLOCKED"), false);
+});
+
+test("task status comparison accepts legacy casing and fails closed", () => {
+  assert.equal(isTaskStatus(" working ", TASK_STATUS.WORKING), true);
+  assert.equal(isTaskStatus("BLOCKED", TASK_STATUS.WORKING), false);
 });
 
 test("resuming a paused task clears pause-only state", () => {
@@ -80,6 +87,31 @@ test("resuming records a verified automation as executed", () => {
     cleanup_required: false,
     executed_at: resumedAt,
   });
+});
+
+test("attaching verified resume automation updates one canonical task state", () => {
+  const state = {
+    status: TASK_STATUS.PAUSED_FOR_QUOTA,
+    thread_reference: "thread-123",
+    resume_after: "2026-09-10T05:00:00.000Z",
+    quota_snapshot: { snapshot_id: "snapshot-123" },
+    resume_automation: { automation_fingerprint: "fingerprint-123" },
+  };
+  const automation = {
+    purpose: "quota_resume",
+    status: "VERIFIED",
+    automation_id: "automation-123",
+    target_thread: "thread-123",
+    resume_after: state.resume_after,
+    snapshot_id: state.quota_snapshot.snapshot_id,
+    automation_fingerprint: "fingerprint-123",
+  };
+
+  const attached = transitionTaskResumeAutomation(state, automation);
+
+  assert.equal(attached.resume_mode, TASK_RESUME_MODE.AUTOMATION);
+  assert.equal(attached.resume_automation, automation);
+  assert.equal(attached.heartbeat_automation_id, automation.automation_id);
 });
 
 test("quota pause stores one canonical scheduling state", () => {
