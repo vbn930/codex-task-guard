@@ -4,6 +4,15 @@ All notable changes to Codex Task Guard are documented here.
 
 ## Unreleased
 
+### Added
+
+- Added opt-in provider-backed semantic phase generation through `phase generate`.
+- Added a versioned provider contract, strict structured-output validation, deterministic provider tests, and native-plan handoff to the existing dependency and quota machinery.
+
+### Changed
+
+- Clarified that semantic phase choices are provider-supplied: Task Guard does not use keyword heuristics, ship a built-in semantic model, or recursively invoke the current Codex task.
+
 ## 0.3.0 - 2026-09-10
 
 ### Added

@@ -39,6 +39,7 @@ node scripts/task-guard.mjs quota
 node scripts/task-guard.mjs runtime identify
 node scripts/task-guard.mjs doctor --project C:\path\to\project
 node scripts/task-guard.mjs automation verify --input -
+node scripts/task-guard.mjs phase generate --provider C:\path\to\provider.mjs --input semantic-request.json
 node scripts/task-guard.mjs phase prepare --project C:\path\to\project --input budget.json
 node scripts/task-guard.mjs phase start --project C:\path\to\project --input phase.json
 node scripts/task-guard.mjs phase complete --project C:\path\to\project --phase-id implementation --concurrent-usage false
@@ -89,7 +90,11 @@ Phase inputs may omit `model` and `reasoning_effort`. At each phase decision/sta
 
 ## Quota-budgeted phases
 
-The task remains the thread-level goal. Callers can submit an explicit native plan with `depends_on` edges and optional `estimated_files` values. Task Guard validates unknown dependencies and cycles, persists the plan and completed phase IDs, derives `dependencies_met`, and exposes only graph-ready phases to the estimator. Automatic phase generation from a task description remains out of scope. `phase prepare` is the default start boundary: it resolves omitted runtime identity, performs one JIT quota refresh, evaluates the budget, and records only the selected phase start from that same snapshot. A no-fit decision creates no active phase. Legacy caller-supplied `dependencies_met` inputs remain supported when no native plan is requested.
+The task remains the thread-level goal. Callers can submit an explicit native plan with `depends_on` edges and optional `estimated_files` values. Task Guard validates unknown dependencies and cycles, persists the plan and completed phase IDs, derives `dependencies_met`, and exposes only graph-ready phases to the estimator. `phase prepare` is the default start boundary: it resolves omitted runtime identity, performs one JIT quota refresh, evaluates the budget, and records only the selected phase start from that same snapshot. A no-fit decision creates no active phase. Legacy caller-supplied `dependencies_met` inputs remain supported when no native plan is requested.
+
+`phase generate` adds an opt-in semantic generation boundary. It loads an explicitly named local ES module whose default export has an `id` and async `generate(request)` function. Task Guard sends that provider the task ID, task description, and versioned structured-output contract. The provider supplies the semantic choices: phase IDs, phase types, dependency edges, and optional file estimates. Task Guard validates the response strictly, rejects additional fields and malformed or invalid graphs, adds native task/cohort metadata, and prints a plan accepted unchanged by `phase prepare`. The provider module runs as trusted local code with the same permissions as Task Guard.
+
+Task Guard does not ship a built-in semantic model, infer phases with keyword rules, or recursively call the currently running Codex task. Without a provider, explicit native plans remain the default and behave exactly as before. See [references/phase-input.md](references/phase-input.md) for the provider contract and a generation example.
 
 `phase finish` records native-plan completion before calculating the next ready phase; callers do not need to resend the plan. `phase start` and `budget evaluate` remain manual diagnostics. Usage records use schema v2 and a stable `phase_run_id`, so retrying after a committed measurement cannot append a duplicate. Measurements include before/after snapshot IDs, sources, observation times, reset identity, runtime provenance, `estimated_files`, and concurrency quality; they contain no source contents or repository paths.
 
@@ -155,6 +160,7 @@ Delete `%CODEX_HOME%\skills\task-guard` (or `%USERPROFILE%\.codex\skills\task-gu
 - The current implementation uses process-per-boundary JIT reads. Persistent app-server monitoring and `account/rateLimits/updated` subscription are future optimizations.
 - `UNKNOWN` quota requires human/agent judgment about whether to continue; the utility does not apply a blind percentage threshold.
 - Cold-start cohorts return `INSUFFICIENT_HISTORY`; the estimator has no fixed model multiplier, automatic model switching, or cross-cohort extrapolation.
+- Semantic phase generation requires a caller-supplied provider module. Task Guard validates and normalizes provider output but does not claim that validation itself supplies semantic understanding.
 - Percentage-point deltas can include shared-pool activity. Only samples explicitly marked as having no concurrent usage are eligible for automatic estimates.
 - Checkpoint projects must be Git repositories.
 
