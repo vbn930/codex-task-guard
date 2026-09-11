@@ -95,6 +95,12 @@ Task Guard can ask an explicitly supplied provider module to convert task prose 
 node <skill-root>/scripts/task-guard.mjs phase generate --provider C:\path\to\provider.mjs --input semantic-request.json
 ```
 
+Use `phase generate` to preview the validated plan. To generate, persist, quota-evaluate, and start the selected graph-ready phase in one lifecycle boundary, use:
+
+```text
+node <skill-root>/scripts/task-guard.mjs phase prepare --provider C:\path\to\provider.mjs --project <project> --input semantic-request.json
+```
+
 The local ES module must default-export an object with a non-empty `id` and an async `generate(request)` function. The request contains `task_id`, `task_description`, and `output_contract`. The function returns only this provider-owned shape:
 
 ```json
@@ -116,9 +122,9 @@ The local ES module must default-export an object with a non-empty `id` and an a
 }
 ```
 
-Every phase requires `phase_id`, `phase_type`, and `depends_on`; `estimated_files` is optional. Additional root or phase fields are rejected. Task Guard then applies the native duplicate, dependency, cycle, and size validations; adds `task_id` and the `semantic-v1` history partition to every phase; preserves the optional safety reserve; and prints a plan that can be passed unchanged to `phase prepare`.
+Every phase requires `phase_id`, `phase_type`, and `depends_on`; `estimated_files` is optional. Additional root or phase fields are rejected. Task Guard then applies the native duplicate, dependency, cycle, and size validations; adds `task_id` and the `semantic-v1` history partition to every phase; and preserves the optional safety reserve. Atomic provider preparation also persists the sanitized `mode`, `provider_id`, and `contract_version` provenance with the native plan. The same provenance is embedded in quota checkpoints and restored on resume. A later call cannot replace it with different provider metadata.
 
-The provider, not Task Guard, chooses the phases and dependency semantics. Task Guard ships no built-in semantic provider, does not use keyword-only decomposition, and does not invoke the current Codex task. Provider modules execute as trusted local code with Task Guard's process permissions. Explicit native plans and legacy non-native phase inputs remain backward compatible and do not load a provider.
+The provider, not Task Guard, chooses the phases and dependency semantics. Task Guard ships no built-in semantic provider, does not use keyword-only decomposition, and does not invoke the current Codex task. Provider modules execute as trusted local code with Task Guard's process permissions. `--provider` cannot be combined with explicit `phases` or `generation` input. Explicit native plans and legacy non-native phase inputs remain backward compatible and do not load a provider.
 
 On `phase finish`, Task Guard marks the active native phase complete and calculates the next ready phase without requiring the caller to resend the graph. A quota checkpoint embeds the native plan, and `resume prepare` restores it only after repository, quota, and automation-cleanup gates pass. `checkpoint complete` removes the persisted plan. Inputs that omit native-plan fields retain the legacy caller-supplied `dependencies_met` behavior.
 

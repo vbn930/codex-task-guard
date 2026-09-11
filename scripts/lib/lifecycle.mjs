@@ -58,6 +58,7 @@ export async function preparePhase({
   taskId,
   phases,
   completedPhaseIds,
+  generation,
   safetyReservePercent,
   snapshotStore,
   taskGuardHome,
@@ -74,6 +75,7 @@ export async function preparePhase({
       taskId,
       phases,
       completedPhaseIds,
+      generation,
       taskGuardHome,
     })
     : null;
@@ -292,6 +294,7 @@ export async function prepareTaskResume({
       projectPath,
       taskGuardHome,
       taskId,
+      generation: restoredPlan.generation,
       phases: restoredPlan.phases,
       completedPhaseIds: restoredPlan.completed_phase_ids,
     });

@@ -59,3 +59,68 @@ test("phase generate emits a provider graph accepted by native phase prepare", a
   assert.deepEqual(preparedOutput.plan.phases, plan.phases);
   assert.deepEqual(preparedOutput.decision.ready_phase_ids, ["implementation"]);
 });
+
+test("phase prepare generates and persists a provider plan in one command", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "task-guard-semantic-prepare-cli-"));
+  const project = path.join(root, "project");
+  const home = path.join(root, "task-guard-home");
+  const requestPath = path.join(root, "request.json");
+  execFileSync("git", ["init", "-q", project]);
+  await writeFile(requestPath, JSON.stringify({
+    task_id: "semantic-prepare-task",
+    task_description: "Add semantic phase generation through a provider.",
+    safety_reserve_percent: 10,
+  }));
+
+  const prepared = run([
+    "phase", "prepare", "--provider", provider,
+    "--project", project, "--input", requestPath,
+  ], {
+    env: {
+      TASK_GUARD_HOME: home,
+      TASK_GUARD_TEST_QUOTA: "healthy",
+      CODEX_THREAD_ID: "",
+      CODEX_SESSION_ID: "",
+    },
+  });
+
+  assert.equal(prepared.status, 0, prepared.stderr);
+  const output = JSON.parse(prepared.stdout);
+  assert.deepEqual(output.plan.generation, {
+    mode: "provider",
+    provider_id: "deterministic-test-provider",
+    contract_version: 1,
+  });
+  assert.deepEqual(output.decision.ready_phase_ids, ["implementation"]);
+});
+
+test("phase prepare rejects provider and explicit phase inputs together", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "task-guard-ambiguous-prepare-cli-"));
+  const project = path.join(root, "project");
+  const requestPath = path.join(root, "request.json");
+  execFileSync("git", ["init", "-q", project]);
+  await writeFile(requestPath, JSON.stringify({
+    task_id: "ambiguous-semantic-task",
+    task_description: "Add semantic phase generation through a provider.",
+    safety_reserve_percent: 10,
+    phases: [{
+      task_id: "ambiguous-semantic-task",
+      phase_id: "caller-phase",
+      phase_type: "implementation",
+      depends_on: [],
+    }],
+  }));
+
+  const prepared = run([
+    "phase", "prepare", "--provider", provider,
+    "--project", project, "--input", requestPath,
+  ], {
+    env: { TASK_GUARD_TEST_QUOTA: "healthy" },
+  });
+
+  assert.equal(prepared.status, 2);
+  assert.match(
+    JSON.parse(prepared.stdout).error.message,
+    /--provider cannot be combined with phases or generation/,
+  );
+});

@@ -377,6 +377,116 @@ test("native phase planning persists completion and restores the next ready phas
   assert.deepEqual(restored.plan.completed_phase_ids, ["design"]);
 });
 
+test("native phase planning persists semantic generation provenance", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-generation-provenance-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  execFileSync("git", ["init", "-q", projectPath]);
+  const generation = {
+    mode: "provider",
+    provider_id: "semantic-provider",
+    contract_version: 1,
+  };
+
+  const prepared = await preparePhase({
+    projectPath,
+    taskGuardHome,
+    taskId: "semantic-native-task",
+    generation,
+    phases: [{
+      task_id: "semantic-native-task",
+      phase_id: "implementation",
+      phase_type: "implementation",
+      plan: "semantic-v1",
+      depends_on: [],
+    }],
+    safetyReservePercent: 10,
+    snapshotStore: { refresh: async () => snapshot(80, "2026-08-31T12:20:00.000Z") },
+    runtimeIdentityReader: async () => ({
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+      source: "codex_app_server_thread",
+      status: "VERIFIED",
+      reason: null,
+    }),
+  });
+
+  assert.deepEqual(prepared.plan.generation, generation);
+  assert.deepEqual(
+    (await readPhasePlan({ projectPath, taskGuardHome })).generation,
+    generation,
+  );
+});
+
+test("native phase planning rejects undeclared generation provenance", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-invalid-provenance-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  execFileSync("git", ["init", "-q", projectPath]);
+
+  await assert.rejects(
+    preparePhase({
+      projectPath,
+      taskGuardHome,
+      taskId: "semantic-native-task",
+      generation: {
+        mode: "provider",
+        provider_id: "semantic-provider",
+        contract_version: 1,
+        provider_output: "must not be persisted",
+      },
+      phases: [{
+        task_id: "semantic-native-task",
+        phase_id: "implementation",
+        phase_type: "implementation",
+        plan: "semantic-v1",
+        depends_on: [],
+      }],
+      safetyReservePercent: 10,
+      snapshotStore: { refresh: async () => snapshot(80, "2026-08-31T12:20:00.000Z") },
+    }),
+    /generation contains unsupported field provider_output/,
+  );
+});
+
+test("native phase planning rejects changed generation provenance", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-changed-provenance-"));
+  const projectPath = path.join(root, "project");
+  const taskGuardHome = path.join(root, "global");
+  execFileSync("git", ["init", "-q", projectPath]);
+  const phases = [{
+    task_id: "semantic-native-task",
+    phase_id: "implementation",
+    phase_type: "implementation",
+    plan: "semantic-v1",
+    depends_on: [],
+  }];
+  await loadOrCreatePhasePlan({
+    projectPath,
+    taskGuardHome,
+    phases,
+    generation: {
+      mode: "provider",
+      provider_id: "provider-a",
+      contract_version: 1,
+    },
+  });
+
+  await assert.rejects(
+    loadOrCreatePhasePlan({
+      projectPath,
+      taskGuardHome,
+      taskId: "semantic-native-task",
+      generation: {
+        mode: "provider",
+        provider_id: "provider-b",
+        contract_version: 1,
+      },
+    }),
+    /phase plan generation provenance does not match/,
+  );
+});
+
 test("quota checkpoint restores the native phase plan before resume selection", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "task-guard-native-resume-"));
   const projectPath = path.join(root, "project");
@@ -390,6 +500,11 @@ test("quota checkpoint restores the native phase plan before resume selection", 
   await loadOrCreatePhasePlan({
     projectPath,
     taskGuardHome: pauseHome,
+    generation: {
+      mode: "provider",
+      provider_id: "resume-provider",
+      contract_version: 1,
+    },
     phases,
     completedPhaseIds: ["design"],
   });
@@ -407,6 +522,11 @@ test("quota checkpoint restores the native phase plan before resume selection", 
   });
   const checkpointState = await readCheckpoint(paused.checkpoint.checkpoint_path);
   assert.deepEqual(checkpointState.phase_plan.completed_phase_ids, ["design"]);
+  assert.deepEqual(checkpointState.phase_plan.generation, {
+    mode: "provider",
+    provider_id: "resume-provider",
+    contract_version: 1,
+  });
   await mkdir(resumeHome);
   await writeFile(path.join(resumeHome, "usage-history.jsonl"), `${JSON.stringify({
     model: "gpt-5.6-sol",
@@ -428,8 +548,9 @@ test("quota checkpoint restores the native phase plan before resume selection", 
 
   assert.equal(resumed.status, "TASK_RESUMED");
   assert.equal(resumed.decision.selected_phase_id, "backend");
-  assert.deepEqual((await readPhasePlan({ projectPath, taskGuardHome: resumeHome }))
-    .completed_phase_ids, ["design"]);
+  const restoredPlan = await readPhasePlan({ projectPath, taskGuardHome: resumeHome });
+  assert.deepEqual(restoredPlan.completed_phase_ids, ["design"]);
+  assert.deepEqual(restoredPlan.generation, checkpointState.phase_plan.generation);
 });
 
 test("phase prepare does not create an active phase when no phase fits", async () => {

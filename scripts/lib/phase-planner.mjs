@@ -21,6 +21,33 @@ const PHASE_FIELDS = [
   "model",
   "reasoning_effort",
 ];
+const GENERATION_FIELDS = new Set(["mode", "provider_id", "contract_version"]);
+
+function normalizedGeneration(generation) {
+  if (generation === undefined) return undefined;
+  if (!generation || typeof generation !== "object" || Array.isArray(generation)) {
+    throw new Error("generation must be an object");
+  }
+  for (const field of Object.keys(generation)) {
+    if (!GENERATION_FIELDS.has(field)) {
+      throw new Error(`generation contains unsupported field ${field}`);
+    }
+  }
+  if (generation.mode !== "provider") {
+    throw new Error("generation.mode must be provider");
+  }
+  if (typeof generation.provider_id !== "string" || generation.provider_id.trim() === "") {
+    throw new Error("generation.provider_id must be a non-empty string");
+  }
+  if (!Number.isInteger(generation.contract_version) || generation.contract_version < 1) {
+    throw new Error("generation.contract_version must be a positive integer");
+  }
+  return {
+    mode: generation.mode,
+    provider_id: generation.provider_id,
+    contract_version: generation.contract_version,
+  };
+}
 
 function normalizedPhases(phases, { requireTaskId = false } = {}) {
   if (!Array.isArray(phases) || phases.length === 0) {
@@ -127,14 +154,22 @@ export async function loadOrCreatePhasePlan({
   taskId,
   phases,
   completedPhaseIds = [],
+  generation,
   taskGuardHome = defaultTaskGuardHome(),
 }) {
   const { projectRoot, planPath } = await planLocation(projectPath, taskGuardHome);
+  const normalizedGenerationState = normalizedGeneration(generation);
   return withFileLock(`${planPath}.lock`, async () => {
     const existing = await readPlanFile(planPath);
     if (existing) {
       if (taskId !== undefined && existing.task_id !== taskId) {
         throw new Error(`phase plan belongs to ${existing.task_id}, not ${taskId}`);
+      }
+      if (normalizedGenerationState !== undefined) {
+        const existingGeneration = normalizedGeneration(existing.generation);
+        if (JSON.stringify(existingGeneration) !== JSON.stringify(normalizedGenerationState)) {
+          throw new Error("phase plan generation provenance does not match");
+        }
       }
       return existing;
     }
@@ -145,6 +180,9 @@ export async function loadOrCreatePhasePlan({
       schema_version: 1,
       task_id: resolvedTaskId,
       project_path: projectRoot,
+      ...(normalizedGenerationState === undefined
+        ? {}
+        : { generation: normalizedGenerationState }),
       phases: normalized,
       completed_phase_ids: [...new Set(completedPhaseIds)],
       updated_at: new Date().toISOString(),
